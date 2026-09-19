@@ -111,13 +111,16 @@ class _DetailBody extends ConsumerWidget {
         ],
       ),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
         children: [
           if (item.thumbnailUrl != null)
-            ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: Image.network(item.thumbnailUrl!,
-                  errorBuilder: (_, __, ___) => const SizedBox.shrink()),
+            Hero(
+              tag: 'thumb-${item.id}',
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Image.network(item.thumbnailUrl!,
+                    errorBuilder: (_, __, ___) => const SizedBox.shrink()),
+              ),
             ),
           const SizedBox(height: 12),
           Text(item.title, style: theme.textTheme.headlineSmall),
@@ -198,36 +201,52 @@ class _DetailBody extends ConsumerWidget {
           const SizedBox(height: 12),
           SelectableText(item.url, style: const TextStyle(color: Colors.blue)),
           const SizedBox(height: 24),
-          FilledButton.icon(
-            icon: const Icon(Icons.open_in_new),
-            label: const Text('Open link'),
-            onPressed: () => _open(item, context),
-          ),
-          const SizedBox(height: 8),
-          FilledButton.tonalIcon(
-            icon: const Icon(Icons.auto_awesome),
-            label: const Text('Ask AI about this'),
-            onPressed: () => showModalBottomSheet(
-              context: context,
-              isScrollControlled: true,
-              builder: (_) => AskAiSheet(item: item),
+          // Primary action first, full-width ≥48dp (mobile UX: thumb reach).
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              icon: const Icon(Icons.open_in_new),
+              label: const Text('Open link'),
+              style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(52)),
+              onPressed: () => _open(item, context),
             ),
           ),
           const SizedBox(height: 8),
-          OutlinedButton.icon(
-            icon: Icon(item.status == ItemStatus.archived
-                ? Icons.unarchive_outlined
-                : Icons.check),
-            label: Text(switch (item.status) {
-              ItemStatus.archived => 'Unarchive to inbox',
-              ItemStatus.done => 'Reopen',
-              ItemStatus.inbox => 'Mark done',
-            }),
-            onPressed: () {
-              ref.read(saveControllerProvider.notifier).setStatus(item.id,
-                  item.status == ItemStatus.inbox ? ItemStatus.done : ItemStatus.inbox);
-              Navigator.pop(context);
-            },
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.tonalIcon(
+              icon: const Icon(Icons.auto_awesome),
+              label: const Text('Ask AI about this'),
+              style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(52)),
+              onPressed: () => showModalBottomSheet(
+                context: context,
+                isScrollControlled: true,
+                builder: (_) => AskAiSheet(item: item),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              icon: Icon(item.status == ItemStatus.archived
+                  ? Icons.unarchive_outlined
+                  : Icons.check),
+              label: Text(switch (item.status) {
+                ItemStatus.archived => 'Unarchive to inbox',
+                ItemStatus.done => 'Reopen',
+                ItemStatus.inbox => 'Mark done',
+              }),
+              style: OutlinedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(48)),
+              onPressed: () {
+                ref.read(saveControllerProvider.notifier).setStatus(item.id,
+                    item.status == ItemStatus.inbox ? ItemStatus.done : ItemStatus.inbox);
+                Navigator.pop(context);
+              },
+            ),
           ),
           TextButton.icon(
             icon: const Icon(Icons.delete_outline, color: Colors.red),

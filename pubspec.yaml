@@ -33,6 +33,8 @@ dependencies:
   cupertino_icons: ^1.0.8
   flutter_riverpod: ^2.6.1
   sqflite: ^2.4.1
+  sqflite_common_ffi: ^2.3.6
+  sqflite_common_ffi_web: ^0.4.5+1
   path: ^1.9.1
   http: ^1.3.0
   html: ^0.15.6

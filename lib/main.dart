@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
@@ -24,10 +25,18 @@ class _SaveLaterAppState extends State<SaveLaterApp> {
   @override
   void initState() {
     super.initState();
-    // Cold start from a share.
-    ReceiveSharingIntent.instance.getInitialMedia().then(_handleShared);
-    // While running.
-    ReceiveSharingIntent.instance.getMediaStream().listen(_handleShared);
+    // Share intents only exist on mobile. On web/desktop the plugin throws
+    // MissingPluginException — skip entirely (browser test found this).
+    if (kIsWeb) return;
+    try {
+      // Cold start from a share.
+      ReceiveSharingIntent.instance.getInitialMedia().then(_handleShared);
+      // While running.
+      ReceiveSharingIntent.instance.getMediaStream().listen(_handleShared,
+          onError: (_) {});
+    } catch (_) {
+      // Plugin unavailable (desktop/web) — manual add still works.
+    }
   }
 
   void _handleShared(List<SharedMediaFile> files) {

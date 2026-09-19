@@ -14,14 +14,19 @@ class ReminderService {
     const android = AndroidInitializationSettings('@mipmap/ic_launcher');
     const settings = InitializationSettings(android: android);
     await _plugin.initialize(settings);
-    await _plugin
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
-        ?.createNotificationChannel(const AndroidNotificationChannel(
-          'reminders',
-          'Reminders',
-          description: 'Read-it-later reminders',
-          importance: Importance.high,
-        ));
+    final androidImpl = _plugin
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    // Android 13+ needs runtime POST_NOTIFICATIONS — without this,
+    // reminders silently never fire (mobile UX trap).
+    try {
+      await androidImpl?.requestNotificationsPermission();
+    } catch (_) {}
+    await androidImpl?.createNotificationChannel(const AndroidNotificationChannel(
+      'reminders',
+      'Reminders',
+      description: 'Read-it-later reminders',
+      importance: Importance.high,
+    ));
     _init = true;
   }
 

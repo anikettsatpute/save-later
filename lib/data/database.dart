@@ -1,5 +1,7 @@
+import 'package:flutter/foundation.dart' hide Category;
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
+import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
 
 import '../models/saved_item.dart';
 
@@ -10,10 +12,17 @@ class AppDatabase {
   static const _version = 4;
   Database? _db;
   bool _ftsAvailable = true;
+  static bool _ffiInit = false;
 
   Future<Database> get db async {
     final existing = _db;
     if (existing != null) return existing;
+    // Web (browser test found this): sqflite plugin has no web
+    // implementation — route through the wasm/ffi-web factory.
+    if (kIsWeb && !_ffiInit) {
+      databaseFactory = createDatabaseFactoryFfiWeb();
+      _ffiInit = true;
+    }
     final dir = await getDatabasesPath();
     final opened = await openDatabase(
       p.join(dir, _name),

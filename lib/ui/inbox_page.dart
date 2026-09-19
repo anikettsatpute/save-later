@@ -74,9 +74,23 @@ class InboxPage extends ConsumerWidget {
           Expanded(
             child: items.when(
               loading: () => const Center(child: CircularProgressIndicator()),
-              error: (e, _) => Center(child: Text('Error: $e')),
+              error: (e, _) => _ErrorState(
+                message: '$e',
+                onRetry: () {
+                  ref.invalidate(itemsProvider);
+                  ref.invalidate(countsProvider);
+                },
+              ),
               data: (list) => list.isEmpty
-                  ? const _EmptyState()
+                  ? (filter.query.isNotEmpty ||
+                          filter.category != null ||
+                          filter.type != null ||
+                          filter.collectionId != null ||
+                          filter.aiOnly ||
+                          filter.remindedOnly ||
+                          filter.status == ItemStatus.archived
+                      ? _NoResultsState(filter: filter, ref: ref)
+                      : const _EmptyState())
                   : RefreshIndicator(
                       onRefresh: () async => ref.invalidate(itemsProvider),
                       child: _BodyList(items: list, viewMode: viewMode),
@@ -88,14 +102,19 @@ class InboxPage extends ConsumerWidget {
       floatingActionButton: Row(
         mainAxisAlignment: MainAxisAlignment.end,
         children: [
-          FloatingActionButton(
-            heroTag: 'filter',
-            mini: true,
-            tooltip: 'Filter & sort',
-            onPressed: () => showModalBottomSheet(
-              context: context,
-              isScrollControlled: true,
-              builder: (_) => const FilterSheet(),
+          SizedBox(
+            width: 48,
+            height: 48,
+            child: FloatingActionButton(
+              heroTag: 'filter',
+              mini: true,
+              tooltip: 'Filter & sort',
+              onPressed: () => showModalBottomSheet(
+                context: context,
+                isScrollControlled: true,
+                builder: (_) => const FilterSheet(),
+              ),
+              child: const Icon(Icons.tune_outlined),
             ),
           ),
           const SizedBox(width: 12),
@@ -103,6 +122,8 @@ class InboxPage extends ConsumerWidget {
             heroTag: 'add',
             icon: const Icon(Icons.add),
             label: const Text('Save link'),
+            // Extended FAB already ≥48dp tall; keep label tappable.
+            extendedPadding: const EdgeInsets.symmetric(horizontal: 20),
             onPressed: () => showModalBottomSheet(
               context: context,
               isScrollControlled: true,
@@ -1005,12 +1026,15 @@ Widget _badge(BuildContext context, String text, IconData icon) {
 
 Widget _thumb(SavedItem item, {double w = 96}) {
   if (item.thumbnailUrl == null) return _typeIcon(item, w: w);
-  return Image.network(
-    item.thumbnailUrl!,
-    width: w,
-    height: 120,
-    fit: BoxFit.cover,
-    errorBuilder: (_, __, ___) => _typeIcon(item, w: w),
+  return Hero(
+    tag: 'thumb-${item.id}',
+    child: Image.network(
+      item.thumbnailUrl!,
+      width: w,
+      height: 120,
+      fit: BoxFit.cover,
+      errorBuilder: (_, __, ___) => _typeIcon(item, w: w),
+    ),
   );
 }
 
@@ -1034,6 +1058,8 @@ Widget _typeIcon(SavedItem item, {double w = 96}) {
 Widget _overflowMenu(BuildContext context, WidgetRef ref, SavedItem item) {
   return PopupMenuButton<String>(
     icon: const Icon(Icons.more_vert, size: 18),
+    // Bigger tap area for thumbs (mobile UX: 18px icon was hard to hit).
+    padding: const EdgeInsets.all(12),
     onSelected: (v) => _overflowAction(context, ref, item, preset: v),
     itemBuilder: (_) => [
       PopupMenuItem(
@@ -1110,6 +1136,84 @@ class _EmptyState extends StatelessWidget {
             SizedBox(height: 8),
             Text(
                 'Share any YouTube video, Reddit post, article or movie link to this app — it will be categorized automatically.'),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Friendly error with retry (browser test: raw "Error: Bad state" scared users).
+class _ErrorState extends StatelessWidget {
+  final String message;
+  final VoidCallback onRetry;
+  const _ErrorState({required this.message, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final friendly = message.contains('databaseFactory')
+        ? 'Storage is not ready on this device yet. Retry — your saves are safe.'
+        : message.length > 160
+            ? '${message.substring(0, 160)}…'
+            : message;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.cloud_off_outlined,
+                size: 56, color: theme.colorScheme.outline),
+            const SizedBox(height: 16),
+            const Text('Something went wrong',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            Text(friendly, textAlign: TextAlign.center),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              icon: const Icon(Icons.refresh),
+              label: const Text('Retry'),
+              onPressed: onRetry,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Filtered search with zero hits: one-tap escape (browser test: users felt trapped).
+class _NoResultsState extends StatelessWidget {
+  final InboxFilter filter;
+  final WidgetRef ref;
+  const _NoResultsState({required this.filter, required this.ref});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.search_off_outlined, size: 56),
+            const SizedBox(height: 16),
+            const Text('No matches',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            Text(
+              filter.query.isNotEmpty
+                  ? 'Nothing matches "${filter.query}". Try fewer words or turn off full-text.'
+                  : 'Nothing matches these filters.',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            FilledButton.tonal(
+              onPressed: () =>
+                  ref.read(filterProvider.notifier).state = const InboxFilter(),
+              child: const Text('Clear search & filters'),
+            ),
           ],
         ),
       ),
