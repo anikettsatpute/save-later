@@ -90,24 +90,26 @@ class _AddSheetState extends ConsumerState<AddSheet> {
                 ? null
                 : () async {
                     final ctrl = ref.read(saveControllerProvider.notifier);
+                    // Capture everything needed for the post-save snackbar
+                    // BEFORE popping: after pop, this context is dead and
+                    // ScaffoldMessenger/View silently do nothing.
+                    final messenger = ScaffoldMessenger.of(context);
+                    final navigator = Navigator.of(context);
                     final result = await ctrl.saveUrl(_url.text,
                         note: _note.text.trim().isEmpty ? null : _note.text.trim());
-                    if (!context.mounted) return;
                     if (result.error != null && result.itemId == null) {
                       // Fatal: nothing saved, keep sheet open so user can fix.
-                      ScaffoldMessenger.of(context)
-                          .showSnackBar(SnackBar(content: Text(result.error!)));
+                      messenger.showSnackBar(SnackBar(content: Text(result.error!)));
                     } else {
                       // Saved (possibly with AI warning, possibly duplicate).
-                      // Always close + offer View so the error never traps the user.
-                      final navigator = Navigator.of(context);
+                      // Close first, then show the snackbar from the parent.
                       navigator.pop();
                       final msg = result.error ??
                           result.aiError ??
                           'Saved ✓ ${result.usedAi ? '(AI)' : '(offline rules)'}';
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      messenger.showSnackBar(SnackBar(
                         content: Text(msg),
-                        duration: const Duration(seconds: 5),
+                        duration: const Duration(seconds: 8),
                         action: result.itemId != null
                             ? SnackBarAction(
                                 label: 'View',

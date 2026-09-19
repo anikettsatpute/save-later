@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:uuid/uuid.dart';
 
 import '../models/saved_item.dart';
 import '../services/ai_service.dart';
 import '../services/link_parser.dart';
 import '../state/providers.dart';
 
-/// Settings: Gemini key management + "test key" that runs a real
-/// categorize call so users can verify the key works before saving links.
+/// Settings v4: Gemini key + test, retry-AI, auto-tag rules manager
+/// (Obsidian-template-style capture pipeline), about.
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
   @override
@@ -48,10 +49,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     });
     try {
       await AiService().saveApiKey(key);
-      // Real end-to-end check with a fixed probe article.
       final meta = await LinkParser.fetchMeta('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
       final ai = AiService();
-      final r = await ai.enrichWithFlag(url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', meta: meta);
+      final r = await ai.enrichWithFlag(
+          url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', meta: meta);
       setState(() {
         _testResult = r.usedAi
             ? '✓ Key works — probe categorized as "${r.enrichment.category.name}" with summary.'
@@ -74,15 +75,18 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         final r = await ai.enrichWithFlag(url: item.url, meta: meta);
         if (r.usedAi) {
           fixed++;
-          await _upsertEnriched(item.id, r.enrichment.category, r.enrichment.summary, r.enrichment.tags);
+          await _upsertEnriched(
+              item.id, r.enrichment.category, r.enrichment.summary, r.enrichment.tags);
         }
       } catch (_) {}
     }
     ref.invalidate(itemsProvider);
     ref.invalidate(countsProvider);
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(fixed == 0 ? 'Nothing to retry (or AI still failing)' : 'Re-categorized $fixed item(s) with AI ✓')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(fixed == 0
+              ? 'Nothing to retry (or AI still failing)'
+              : 'Re-categorized $fixed item(s) with AI ✓')));
     }
   }
 
@@ -103,6 +107,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final rules = ref.watch(rulesProvider).maybeWhen(
+          data: (v) => v,
+          orElse: () => <TagRule>[],
+        );
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
       body: ListView(
@@ -112,7 +120,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
           const Text(
-              'Paste a Gemini API key (free at aistudio.google.com → Get API key). Stored only on this device. Without a key, the app uses offline rules.\n\nIf items show "offline rules" even with a key, use Test key below — it will tell you exactly what is wrong (bad key, quota, blocked model).'),
+              'Paste a Gemini API key (free at aistudio.google.com → Get API key). Stored only on this device. Without a key, the app uses offline rules.\n\nIf items show "offline rules" even with a key, use Test key below.'),
           const SizedBox(height: 12),
           if (!_loaded)
             const Center(child: CircularProgressIndicator())
@@ -166,12 +174,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           ),
           if (_testResult != null) ...[
             const SizedBox(height: 12),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text(_testResult!),
-              ),
-            ),
+            Card(child: Padding(padding: const EdgeInsets.all(12), child: Text(_testResult!))),
           ],
           const SizedBox(height: 24),
           const Text('Library',
@@ -185,9 +188,139 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             label: const Text('Retry AI for offline items'),
             onPressed: _retryPending,
           ),
+          const SizedBox(height: 24),
+          Row(
+            children: [
+              const Text('Auto-tag rules',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const Spacer(),
+              IconButton(
+                icon: const Icon(Icons.add),
+                tooltip: 'New rule',
+                onPressed: () => _ruleDialog(context, ref, null),
+              ),
+            ],
+          ),
+          const Text(
+              'Rules run before AI at save time. First matching rule wins — e.g. match "lexfridman" → Learn + podcast.'),
+          const SizedBox(height: 8),
+          if (rules.isEmpty)
+            const Card(
+                child: Padding(
+                    padding: EdgeInsets.all(12),
+                    child: Text('No rules yet. Add one for your favorite channels or sites.')))
+          else
+            ...rules.map((r) => Card(
+                  child: ListTile(
+                    leading: Icon(r.enabled
+                        ? Icons.rule_outlined
+                        : Icons.rule_folder_outlined),
+                    title: Text('"${r.match}"'),
+                    subtitle: Text(
+                        '${r.category != null ? '→ ${r.category!.label}' : 'no category change'}${r.tags.isNotEmpty ? ' + ${r.tags.map((t) => '#$t').join(' ')}' : ''}'),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Switch(
+                          value: r.enabled,
+                          onChanged: (v) async {
+                            await ref.read(dbProviderForRetry).upsertRule(TagRule(
+                                id: r.id,
+                                match: r.match,
+                                category: r.category,
+                                tags: r.tags,
+                                enabled: v));
+                            ref.invalidate(rulesProvider);
+                          },
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.edit_outlined, size: 18),
+                          onPressed: () => _ruleDialog(context, ref, r),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline,
+                              size: 18, color: Colors.red),
+                          onPressed: () async {
+                            await ref.read(dbProviderForRetry).deleteRule(r.id);
+                            ref.invalidate(rulesProvider);
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                )),
         ],
       ),
     );
+  }
+
+  Future<void> _ruleDialog(BuildContext context, WidgetRef ref, TagRule? existing) async {
+    final match = TextEditingController(text: existing?.match ?? '');
+    final tags = TextEditingController(text: existing?.tags.join(', ') ?? '');
+    Category? category = existing?.category;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) => AlertDialog(
+          title: Text(existing == null ? 'New rule' : 'Edit rule'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                  controller: match,
+                  autofocus: true,
+                  decoration: const InputDecoration(
+                      labelText: 'URL contains…',
+                      hintText: 'e.g. lexfridman or nytimes.com',
+                      border: OutlineInputBorder())),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<Category?>(
+                initialValue: category,
+                decoration: const InputDecoration(
+                    labelText: 'Force category (optional)',
+                    border: OutlineInputBorder()),
+                items: [
+                  const DropdownMenuItem(value: null, child: Text('— AI decides —')),
+                  ...Category.values.map((c) =>
+                      DropdownMenuItem(value: c, child: Text(c.label))),
+                ],
+                onChanged: (v) => setState(() => category = v),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                  controller: tags,
+                  decoration: const InputDecoration(
+                      labelText: 'Extra tags (comma separated)',
+                      hintText: 'e.g. podcast, longform',
+                      border: OutlineInputBorder())),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Save')),
+          ],
+        ),
+      ),
+    );
+    if (ok == true && match.text.trim().isNotEmpty) {
+      await ref.read(dbProviderForRetry).upsertRule(TagRule(
+            id: existing?.id ?? const Uuid().v4(),
+            match: match.text.trim(),
+            category: category,
+            tags: tags.text
+                .split(',')
+                .map((t) => t.trim().toLowerCase())
+                .where((t) => t.isNotEmpty)
+                .take(3)
+                .toList(),
+            enabled: existing?.enabled ?? true,
+          ));
+      ref.invalidate(rulesProvider);
+    }
   }
 }
 

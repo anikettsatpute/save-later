@@ -125,11 +125,11 @@ You categorize saved links for a read-it-later app. Reply with ONLY valid JSON, 
 Rules: YouTube/music videos -> Watch. Podcasts/audio -> Listen. Movies/series/IMDb -> Movies & Shows. Tutorials/docs/courses -> Learn. Products/deals -> Shopping. Reddit threads/discussions/opinion -> Ideas or Read based on content. News/articles/blogs -> Read. Default Other only if nothing fits.
 
 ${context}''';
-    // Model list: 2.5-flash-lite is the current cheap/fast default;
-    // 2.0-flash kept as fallback. (2.5-flash without suffix does not exist
-    // as a public model id — that was the "non-JSON" outage: the API
-    // returned 404 HTML, not JSON.)
-    const models = ['gemini-2.5-flash-lite', 'gemini-2.0-flash'];
+    // Model list (verified 2026-09-20 against ai.google.dev/gemini-api/docs/models):
+    // gemini-2.0-flash is SHUT DOWN; gemini-2.5-flash-lite exists but some keys
+    // are restricted to newer generations. Primary: gemini-3.6-flash (stable),
+    // fallbacks: gemini-2.5-flash (stable), gemini-2.5-flash-lite (cheapest).
+    const models = ['gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
     Object? lastErr;
     for (final model in models) {
       try {
@@ -203,33 +203,98 @@ ${context}''';
     // Strip accidental markdown fences.
     if (text.startsWith('```')) {
       text = text.replaceFirst(RegExp(r'^```[a-zA-Z]*\n?'), '').replaceAll(RegExp(r'\n?```\s*$'), '');
+      text = text.trim();
     }
-    final jsonStart = text.indexOf('{');
-    final jsonEnd = text.lastIndexOf('}');
-    if (jsonStart < 0 || jsonEnd <= jsonStart) {
+    // Gemini 3.x often wraps JSON in prose ("Here is the categorization: {...}").
+    // Extract the largest {...} block; if braces are unbalanced (truncated),
+    // repair by closing them before parsing.
+    final extracted = _extractJsonObject(text);
+    if (extracted == null) {
       // Last resort: derive a usable enrichment from the raw text instead of
       // failing the whole save.
       return AiEnrichment(
         category: _guessFromText('$url-fallback $text'),
-        summary: text.length > 220 ? '${text.substring(0, 220)}…' : text,
+        summary: _cleanProse(text),
         tags: const [],
       );
     }
     Map<String, dynamic> parsed;
     try {
-      parsed = jsonDecode(text.substring(jsonStart, jsonEnd + 1)) as Map<String, dynamic>;
+      parsed = jsonDecode(extracted) as Map<String, dynamic>;
     } catch (_) {
       return AiEnrichment(
         category: Category.read,
-        summary: text.length > 220 ? '${text.substring(0, 220)}…' : text,
+        summary: _cleanProse(text),
         tags: const [],
       );
     }
+    // Guard: model echoed keys but left values empty, or returned the schema
+    // itself (summary literally "..." or containing "category:"). Fall back to
+    // cleaned prose instead of storing raw JSON in the summary field.
+    var summary = ((parsed['summary'] as String?) ?? '').trim();
+    if (summary.isEmpty ||
+        summary == '...' ||
+        RegExp(r'^\{.*"category"').hasMatch(summary) ||
+        summary.contains('"summary"')) {
+      summary = _cleanProse(text);
+    }
     return AiEnrichment(
       category: _parseCategory(parsed['category'] as String?),
-      summary: ((parsed['summary'] as String?) ?? '').trim(),
+      summary: summary,
       tags: ((parsed['tags'] as List?) ?? []).map((e) => e.toString().toLowerCase()).take(3).toList(),
     );
+  }
+
+  /// Finds the first balanced {...} block in [text]. If the block is cut off
+  /// (unbalanced open braces from truncation), appends the missing closers.
+  /// Returns null when no '{' exists at all.
+  String? _extractJsonObject(String text) {
+    final start = text.indexOf('{');
+    if (start < 0) return null;
+    var depth = 0;
+    var inString = false;
+    var escape = false;
+    for (var i = start; i < text.length; i++) {
+      final ch = text[i];
+      if (inString) {
+        if (escape) {
+          escape = false;
+        } else if (ch == '\\') {
+          escape = true;
+        } else if (ch == '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch == '"') {
+        inString = true;
+      } else if (ch == '{') {
+        depth++;
+      } else if (ch == '}') {
+        depth--;
+        if (depth == 0) return text.substring(start, i + 1);
+      }
+    }
+    // Unbalanced: repair by closing all open braces (truncation case).
+    if (depth > 0) {
+      return '${text.substring(start)}${'}' * depth}';
+    }
+    return null;
+  }
+
+  /// Strips JSON scaffolding from prose so the summary field never shows raw
+  /// `{"category": ...}` text to the user.
+  String _cleanProse(String text) {
+    var t = text.trim();
+    // Remove a leading prose intro up to the JSON block.
+    final js = t.indexOf('{');
+    if (js > 0) t = t.substring(0, js).trim();
+    // Remove leftover JSON-ish fragments.
+    t = t.replaceAll(RegExp(r'```[a-zA-Z]*'), '').replaceAll('```', '');
+    t = t.replaceAll(RegExp(r'\{"category".*$', dotAll: true), '').trim();
+    t = t.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (t.isEmpty) return 'Saved link';
+    return t.length > 220 ? '${t.substring(0, 220)}…' : t;
   }
 
   Category _parseCategory(String? raw) {
@@ -245,8 +310,9 @@ ${context}''';
   }
 
   // ------------------------------------------------------------ ask AI chat
-  /// Builds the shared item context block used for Q&A.
-  String itemContext(SavedItem item) {
+  /// Builds the shared item context block used for Q&A. Highlights and the
+  /// user's own note are included — Obsidian-style: your words anchor the AI.
+  String itemContext(SavedItem item, {List<Highlight> highlights = const []}) {
     final b = StringBuffer()
       ..writeln('URL: ${item.url}')
       ..writeln('Title: ${item.title}')
@@ -262,6 +328,15 @@ ${context}''';
     if (item.excerpt?.isNotEmpty == true && item.excerpt != item.summary) {
       b.writeln('Page excerpt: ${item.excerpt}');
     }
+    if (item.userNote?.isNotEmpty == true) {
+      b.writeln('MY NOTE (pay special attention, this is what I care about): ${item.userNote}');
+    }
+    if (highlights.isNotEmpty) {
+      b.writeln('MY HIGHLIGHTS:');
+      for (final h in highlights.take(10)) {
+        b.writeln('- "${h.text}"${h.note?.isNotEmpty == true ? ' [my note: ${h.note}]' : ''}');
+      }
+    }
     return b.toString();
   }
 
@@ -272,15 +347,22 @@ ${context}''';
     required String question,
     List<({String q, String a})> history = const [],
     String? articleText,
+    List<Highlight> highlights = const [],
   }) async {
     final key = await getApiKey();
     if (key == null || key.isEmpty) {
       throw Exception('No Gemini key. Add one in Settings first.');
     }
-    final context = StringBuffer(itemContext(item));
-    if (articleText?.isNotEmpty == true) {
+    // Prefer the stored full body (saved at capture) over a live refetch.
+    final body = articleText?.isNotEmpty == true
+        ? articleText
+        : item.bodyText?.isNotEmpty == true
+            ? item.bodyText
+            : null;
+    final context = StringBuffer(itemContext(item, highlights: highlights));
+    if (body?.isNotEmpty == true) {
       context.writeln(
-          'Article content (may be truncated): ${articleText!.substring(0, articleText!.length.clamp(0, 6000))}');
+          'Article content (may be truncated): ${body!.substring(0, body!.length.clamp(0, 6000))}');
     }
     final contents = <Map<String, dynamic>>[
       {
@@ -314,7 +396,7 @@ ${context}''';
       ]
     });
 
-    const models = ['gemini-2.5-flash-lite', 'gemini-2.0-flash'];
+    const models = ['gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
     Object? lastErr;
     for (final model in models) {
       try {

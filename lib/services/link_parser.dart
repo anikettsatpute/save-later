@@ -87,6 +87,10 @@ class LinkParser {
         final meta = await _redditRich(normalized);
         if (meta != null) return meta;
       }
+      if (_insta.hasMatch(normalized.toLowerCase())) {
+        final meta = await _instagramRich(normalized);
+        if (meta != null) return meta;
+      }
       return await _richPage(normalized);
     } catch (_) {
       return LinkMeta(title: _fallbackTitle(normalized), type: detectType(normalized));
@@ -205,6 +209,99 @@ class LinkParser {
     } catch (_) {
       return null;
     }
+  }
+
+  // -------------------------------------------------------------- instagram
+  /// Instagram is login-walled: no oEmbed without a token, and page HTML is
+  /// mostly JS. Strategy: parse the shortcode, try the public oEmbed with a
+  /// browser UA (sometimes works), else rich-page scrape (caption sometimes
+  /// in og:description), else a clean "Instagram post by @user" fallback with
+  /// the shortcode as context for AI.
+  static Future<LinkMeta?> _instagramRich(String url) async {
+    final shortcode = _instagramShortcode(url);
+    final username = _instagramUsername(url);
+
+    // 1. Public oEmbed (works for some posts without auth).
+    try {
+      final res = await http
+          .get(Uri.parse('https://www.instagram.com/oembed?url=${Uri.encodeComponent(url)}'),
+              headers: {'User-Agent': _browserUa})
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        final j = jsonDecode(res.body) as Map<String, dynamic>;
+        return LinkMeta(
+          title: (j['title'] as String?) ??
+              (username != null ? 'Instagram post by @$username' : 'Instagram post'),
+          type: ItemType.instagram,
+          author: (j['author_name'] as String?) ?? (username != null ? '@$username' : null),
+          thumbnailUrl: _validThumb(j['thumbnail_url'] as String?),
+          siteName: 'Instagram',
+          isVideo: (j['html'] as String?)?.contains('<video') == true ||
+              url.contains('/reel'),
+        );
+      }
+    } catch (_) {}
+
+    // 2. Page scrape — caption occasionally in og:description.
+    try {
+      final page = await _richPage(url);
+      final hasCaption = (page.description?.length ?? 0) > 30;
+      if (hasCaption || page.thumbnailUrl != null) {
+        return LinkMeta(
+          title: hasCaption
+              ? _clip(page.description!, 120)
+              : (username != null ? 'Instagram post by @$username' : 'Instagram post'),
+          type: ItemType.instagram,
+          author: username != null ? '@$username' : page.author,
+          thumbnailUrl: page.thumbnailUrl,
+          description: page.description,
+          siteName: 'Instagram',
+          isVideo: url.contains('/reel') || (page.isVideo ?? false),
+          articleText: page.articleText,
+        );
+      }
+    } catch (_) {}
+
+    // 3. Clean fallback — shortcode + username give AI something to work with.
+    final label = username != null ? 'Instagram post by @$username' : 'Instagram post';
+    return LinkMeta(
+      title: shortcode != null ? '$label ($shortcode)' : label,
+      type: ItemType.instagram,
+      author: username != null ? '@$username' : null,
+      siteName: 'Instagram',
+      isVideo: url.contains('/reel'),
+      description: username != null
+          ? 'Instagram post/reel by @$username. Open in Instagram to view.'
+          : 'Instagram post. Open in Instagram to view.',
+    );
+  }
+
+  static String? _instagramShortcode(String url) {
+    try {
+      final uri = Uri.parse(url);
+      final segs = uri.pathSegments.where((s) => s.isNotEmpty).toList();
+      // /p/<code>, /reel/<code>, /reels/<code>, /tv/<code>
+      for (var i = 0; i < segs.length - 1; i++) {
+        if (['p', 'reel', 'reels', 'tv'].contains(segs[i].toLowerCase())) {
+          return segs[i + 1];
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  static String? _instagramUsername(String url) {
+    try {
+      final uri = Uri.parse(url);
+      final segs = uri.pathSegments.where((s) => s.isNotEmpty).toList();
+      // Profile links: instagram.com/<username>[/...]
+      if (segs.isNotEmpty &&
+          !['p', 'reel', 'reels', 'tv', 'explore', 'stories', 'direct', 'accounts'].contains(segs[0].toLowerCase())) {
+        final name = segs[0];
+        if (RegExp(r'^[A-Za-z0-9._]{1,30}$').hasMatch(name)) return name;
+      }
+    } catch (_) {}
+    return null;
   }
 
   // ------------------------------------------------------------- rich page

@@ -5,14 +5,14 @@ import '../data/database.dart';
 import '../models/saved_item.dart';
 import '../services/ai_service.dart';
 import '../services/link_parser.dart';
+import '../services/reminder_service.dart';
 import '../services/share_parser.dart';
 
 final _dbProvider = Provider((_) => AppDatabase());
 final _aiProvider = Provider((_) => AiService());
 const _uuid = Uuid();
 
-/// Exposed for Settings retry path (re-upsert enriched items).
-// ignore: unused_element
+/// Exposed for Settings retry path + detail direct-load.
 final dbProviderForRetry = _dbProvider;
 
 /// Item id to navigate to (set by save sheet "View" action, consumed by inbox).
@@ -24,14 +24,20 @@ class InboxFilter {
   final ItemStatus? status;
   final Category? category;
   final ItemType? type;
+  final String? collectionId;
   final bool aiOnly;
+  final bool remindedOnly;
+  final bool fullText;
   final SortMode sort;
   final String query;
   const InboxFilter({
     this.status = ItemStatus.inbox,
     this.category,
     this.type,
+    this.collectionId,
     this.aiOnly = false,
+    this.remindedOnly = false,
+    this.fullText = true,
     this.sort = SortMode.newest,
     this.query = '',
   });
@@ -40,7 +46,10 @@ class InboxFilter {
     ItemStatus? Function()? status,
     Category? Function()? category,
     ItemType? Function()? type,
+    String? Function()? collectionId,
     bool? aiOnly,
+    bool? remindedOnly,
+    bool? fullText,
     SortMode? sort,
     String? query,
   }) {
@@ -48,7 +57,10 @@ class InboxFilter {
       status: status != null ? status() : this.status,
       category: category != null ? category() : this.category,
       type: type != null ? type() : this.type,
+      collectionId: collectionId != null ? collectionId() : this.collectionId,
       aiOnly: aiOnly ?? this.aiOnly,
+      remindedOnly: remindedOnly ?? this.remindedOnly,
+      fullText: fullText ?? this.fullText,
       sort: sort ?? this.sort,
       query: query ?? this.query,
     );
@@ -57,27 +69,43 @@ class InboxFilter {
 
 final filterProvider = StateProvider<InboxFilter>((_) => const InboxFilter());
 
+/// Bumped on every data mutation. Counts/collections watch this — never
+/// itemsProvider — so filter taps never trigger recounts (the old glitch).
+final dataVersionProvider = StateProvider<int>((_) => 0);
+
+void _bumpData(Ref ref) => ref.read(dataVersionProvider.notifier).state++;
+
+/// Public alias so UI controllers (highlights/collections) can bump.
+void bumpData(Ref ref) => _bumpData(ref);
+
+/// Persisted view density (list/grid/headlines), Raindrop-style.
+final viewModeProvider = StateProvider<ViewMode>((_) => ViewMode.list);
+
 final itemsProvider = FutureProvider<List<SavedItem>>((ref) async {
   final f = ref.watch(filterProvider);
   final db = ref.watch(_dbProvider);
+  await db.backfillFts();
   final list = await db.list(
     status: f.status,
     category: f.category,
     type: f.type,
+    collectionId: f.collectionId,
     aiOnly: f.aiOnly,
+    remindedOnly: f.remindedOnly,
     query: f.query.isEmpty ? null : f.query,
+    fullText: f.fullText,
   );
   switch (f.sort) {
     case SortMode.newest:
-      return list; // DB returns createdAt DESC
+      return list;
     case SortMode.oldest:
       return list.reversed.toList();
     case SortMode.az:
-      return [...list]..sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
+      return [...list]
+        ..sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
   }
 });
 
-/// Aggregate counts for the stats header + category rail.
 class ItemCounts {
   final int inbox;
   final int done;
@@ -88,8 +116,7 @@ class ItemCounts {
 }
 
 final countsProvider = FutureProvider<ItemCounts>((ref) async {
-  // Recompute whenever the list changes.
-  ref.watch(itemsProvider);
+  ref.watch(dataVersionProvider);
   final db = ref.watch(_dbProvider);
   final inbox = await db.count(status: ItemStatus.inbox);
   final done = await db.count(status: ItemStatus.done);
@@ -101,20 +128,30 @@ final countsProvider = FutureProvider<ItemCounts>((ref) async {
   return ItemCounts(inbox: inbox, done: done, unreadAi: unreadAi, perCategory: perCategory);
 });
 
+final collectionsProvider = FutureProvider<List<Collection>>((ref) async {
+  ref.watch(dataVersionProvider);
+  return ref.watch(_dbProvider).collections();
+});
+
+final rulesProvider = FutureProvider<List<TagRule>>((ref) async {
+  ref.watch(dataVersionProvider);
+  return ref.watch(_dbProvider).tagRules();
+});
+
 enum SavePhase { idle, fetching, ai, saving }
 
 final savePhaseProvider = StateProvider<SavePhase>((_) => SavePhase.idle);
 
 class SaveResult {
-  final String? error; // fatal: nothing saved
-  final String? aiError; // non-fatal: saved with rules, AI failed
+  final String? error;
+  final String? aiError;
   final String? itemId;
   final bool usedAi;
   const SaveResult({this.error, this.aiError, this.itemId, this.usedAi = false});
   bool get ok => error == null;
 }
 
-/// Orchestrates: parse share -> fetch meta -> AI enrich -> persist.
+/// Orchestrates: parse share -> rules -> fetch meta -> AI enrich -> persist.
 class SaveController extends StateNotifier<AsyncValue<void>> {
   final Ref _ref;
   SaveController(this._ref) : super(const AsyncValue.data(null));
@@ -138,16 +175,21 @@ class SaveController extends StateNotifier<AsyncValue<void>> {
       }
       phase.state = SavePhase.fetching;
       final meta = await LinkParser.fetchMeta(url);
+      // Auto-tag rules run before AI (user pipeline wins).
+      final rules = await db.tagRules();
+      final ruleHit = _matchRule(rules, url, meta);
       phase.state = SavePhase.ai;
       final ai = _ref.read(_aiProvider);
       final result = await ai.enrichWithFlag(url: url, meta: meta);
       final enrichment = result.enrichment;
       phase.state = SavePhase.saving;
+      final tags = <String>{
+        ...enrichment.tags,
+        if (ruleHit != null) ...ruleHit.tags,
+      }.take(5).toList();
       final item = SavedItem(
         id: _uuid.v4(),
         url: url,
-        // Shared title hint (e.g. YouTube app sends title) wins over note field,
-        // explicit note wins over everything.
         title: note?.isNotEmpty == true
             ? note!
             : (parsed.titleHint?.isNotEmpty == true ? parsed.titleHint! : meta.title),
@@ -155,8 +197,8 @@ class SaveController extends StateNotifier<AsyncValue<void>> {
         thumbnailUrl: meta.thumbnailUrl,
         author: meta.author,
         summary: enrichment.summary.isNotEmpty ? enrichment.summary : meta.description,
-        category: enrichment.category,
-        tags: enrichment.tags,
+        category: ruleHit?.category ?? enrichment.category,
+        tags: tags,
         createdAt: DateTime.now(),
         aiProcessed: result.usedAi,
         siteName: meta.siteName,
@@ -166,9 +208,11 @@ class SaveController extends StateNotifier<AsyncValue<void>> {
         redditScore: meta.redditScore,
         redditComments: meta.redditComments,
         isVideo: meta.isVideo,
+        bodyText: meta.articleText,
       );
       await db.upsert(item);
       _ref.invalidate(itemsProvider);
+      _bumpData(_ref);
       state = const AsyncValue.data(null);
       phase.state = SavePhase.idle;
       final hasKey = (await ai.getApiKey())?.isNotEmpty == true;
@@ -183,14 +227,57 @@ class SaveController extends StateNotifier<AsyncValue<void>> {
     }
   }
 
+  TagRule? _matchRule(List<TagRule> rules, String url, LinkMeta meta) {
+    final hay = '${url.toLowerCase()} ${(meta.siteName ?? '').toLowerCase()}';
+    for (final r in rules) {
+      if (!r.enabled || r.match.trim().isEmpty) continue;
+      if (hay.contains(r.match.trim().toLowerCase())) return r;
+    }
+    return null;
+  }
+
   Future<void> setStatus(String id, ItemStatus status) async {
     await _ref.read(_dbProvider).updateStatus(id, status);
     _ref.invalidate(itemsProvider);
+    _bumpData(_ref);
   }
 
   Future<void> remove(String id) async {
+    await ReminderService.cancel(ReminderService.notifId(id));
     await _ref.read(_dbProvider).delete(id);
     _ref.invalidate(itemsProvider);
+    _bumpData(_ref);
+  }
+
+  Future<void> setReminder(String id, DateTime? when) async {
+    final db = _ref.read(_dbProvider);
+    await db.updateFields(id, {'remindAt': when?.millisecondsSinceEpoch});
+    if (when == null) {
+      await ReminderService.cancel(ReminderService.notifId(id));
+    } else {
+      final item = await db.getById(id);
+      await ReminderService.schedule(
+        id: ReminderService.notifId(id),
+        title: item?.title ?? 'Saved item',
+        when: when,
+        body: item?.summary,
+      );
+    }
+    _ref.invalidate(itemsProvider);
+    _bumpData(_ref);
+  }
+
+  Future<void> saveNote(String id, String note) async {
+    await _ref.read(_dbProvider).updateFields(
+        id, {'userNote': note.trim().isEmpty ? null : note.trim()});
+    _ref.invalidate(itemsProvider);
+    _bumpData(_ref);
+  }
+
+  Future<void> setCollections(String id, List<String> collectionIds) async {
+    await _ref.read(_dbProvider).setItemCollections(id, collectionIds);
+    _ref.invalidate(itemsProvider);
+    _bumpData(_ref);
   }
 }
 

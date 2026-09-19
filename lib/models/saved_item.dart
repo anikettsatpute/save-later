@@ -18,6 +18,117 @@ extension CategoryLabel on Category {
       };
 }
 
+/// View density for the inbox (Raindrop-style per-user layout choice).
+enum ViewMode { list, grid, headlines }
+
+/// User collection (Raindrop-style folder). Items link via item_collections.
+class Collection {
+  final String id;
+  final String name;
+  final String? icon;
+  final int sortOrder;
+  final DateTime createdAt;
+
+  const Collection({
+    required this.id,
+    required this.name,
+    this.icon,
+    this.sortOrder = 0,
+    required this.createdAt,
+  });
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'name': name,
+        'icon': icon,
+        'sortOrder': sortOrder,
+        'createdAt': createdAt.millisecondsSinceEpoch,
+      };
+
+  factory Collection.fromMap(Map<String, dynamic> m) => Collection(
+        id: m['id'] as String,
+        name: m['name'] as String,
+        icon: m['icon'] as String?,
+        sortOrder: (m['sortOrder'] as int?) ?? 0,
+        createdAt: DateTime.fromMillisecondsSinceEpoch(m['createdAt'] as int),
+      );
+}
+
+/// Auto-tag rule: URL substring match -> forced category + extra tags.
+/// Applied before AI; user-managed in Settings (Obsidian-style templates
+/// for your capture pipeline).
+class TagRule {
+  final String id;
+  final String match;
+  final Category? category;
+  final List<String> tags;
+  final bool enabled;
+
+  const TagRule({
+    required this.id,
+    required this.match,
+    this.category,
+    this.tags = const [],
+    this.enabled = true,
+  });
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'pattern': match,
+        'category': category?.name,
+        'tags': tags.join(','),
+        'enabled': enabled ? 1 : 0,
+      };
+
+  factory TagRule.fromMap(Map<String, dynamic> m) => TagRule(
+        id: m['id'] as String,
+        // Column was renamed match -> pattern in DB v4 (match is reserved).
+        // Accept both keys so rows written by the short-lived v3 build load.
+        match: (m['pattern'] ?? m['match']) as String,
+        category: (m['category'] as String?) != null
+            ? Category.values.byName(m['category'] as String)
+            : null,
+        tags: ((m['tags'] as String?) ?? '')
+            .split(',')
+            .where((t) => t.isNotEmpty)
+            .toList(),
+        enabled: (m['enabled'] as int? ?? 1) == 1,
+      );
+}
+
+/// A highlight / annotation on an item (Obsidian-style atomic note).
+class Highlight {
+  final String id;
+  final String itemId;
+  final String text;
+  final String? note;
+  final DateTime createdAt;
+
+  const Highlight({
+    required this.id,
+    required this.itemId,
+    required this.text,
+    this.note,
+    required this.createdAt,
+  });
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'itemId': itemId,
+        'text': text,
+        'note': note,
+        'createdAt': createdAt.millisecondsSinceEpoch,
+      };
+
+  factory Highlight.fromMap(Map<String, dynamic> m) => Highlight(
+        id: m['id'] as String,
+        itemId: m['itemId'] as String,
+        text: m['text'] as String,
+        note: m['note'] as String?,
+        createdAt: DateTime.fromMillisecondsSinceEpoch(m['createdAt'] as int),
+      );
+}
+
 class SavedItem {
   final String id;
   final String url;
@@ -40,6 +151,10 @@ class SavedItem {
   final int? redditScore;
   final int? redditComments;
   final bool? isVideo;
+  // v3 fields: full-text body, Obsidian-style personal note, reminder.
+  final String? bodyText;
+  final String? userNote;
+  final DateTime? remindAt;
 
   const SavedItem({
     required this.id,
@@ -62,6 +177,9 @@ class SavedItem {
     this.redditScore,
     this.redditComments,
     this.isVideo,
+    this.bodyText,
+    this.userNote,
+    this.remindAt,
   });
 
   SavedItem copyWith({
@@ -82,6 +200,9 @@ class SavedItem {
     int? redditScore,
     int? redditComments,
     bool? isVideo,
+    String? bodyText,
+    String? userNote,
+    DateTime? Function()? remindAt,
   }) {
     return SavedItem(
       id: id,
@@ -104,6 +225,9 @@ class SavedItem {
       redditScore: redditScore ?? this.redditScore,
       redditComments: redditComments ?? this.redditComments,
       isVideo: isVideo ?? this.isVideo,
+      bodyText: bodyText ?? this.bodyText,
+      userNote: userNote ?? this.userNote,
+      remindAt: remindAt != null ? remindAt() : this.remindAt,
     );
   }
 
@@ -128,6 +252,9 @@ class SavedItem {
         'redditScore': redditScore,
         'redditComments': redditComments,
         'isVideo': isVideo == null ? null : (isVideo! ? 1 : 0),
+        'bodyText': bodyText,
+        'userNote': userNote,
+        'remindAt': remindAt?.millisecondsSinceEpoch,
       };
 
   factory SavedItem.fromMap(Map<String, dynamic> m) => SavedItem(
@@ -153,5 +280,10 @@ class SavedItem {
         redditScore: m['redditScore'] as int?,
         redditComments: m['redditComments'] as int?,
         isVideo: (m['isVideo'] as int?) == null ? null : (m['isVideo'] as int) == 1,
+        bodyText: m['bodyText'] as String?,
+        userNote: m['userNote'] as String?,
+        remindAt: (m['remindAt'] as int?) != null
+            ? DateTime.fromMillisecondsSinceEpoch(m['remindAt'] as int)
+            : null,
       );
 }

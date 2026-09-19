@@ -1,17 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import 'package:url_launcher/url_launcher.dart';
+import 'package:uuid/uuid.dart';
 
 import '../models/saved_item.dart';
 import '../services/ai_service.dart';
-import '../services/link_parser.dart';
 import '../state/providers.dart';
 
-/// Detail view: hero thumbnail, source line, signal badges, summary,
-/// tags, AI status, actions + Ask-AI chat with the item in context.
-/// Delete requires confirmation. Open prefers in-app browser.
+/// Detail view v4 (Obsidian-inspired knowledge card):
+/// hero, source line, chips, summary, excerpt, MY NOTE (markdown-lite),
+/// highlights, collections, reminder, actions, Ask-AI.
 class DetailPage extends ConsumerWidget {
   final String itemId;
   final String url;
@@ -24,20 +25,14 @@ class DetailPage extends ConsumerWidget {
       data: (list) => list.where((e) => e.id == itemId).firstOrNull,
       orElse: () => null,
     );
-    if (item == null) {
-      // Item may be outside the current filter (e.g. opened via "View" after
-      // saving while a category filter is active). Fall back to direct load.
-      return _DirectDetail(itemId: itemId, fallbackUrl: url);
-    }
+    if (item == null) return _DirectDetail(itemId: itemId);
     return _DetailBody(item: item);
   }
 }
 
-/// Loads the item directly from DB when it is not in the filtered list.
 class _DirectDetail extends ConsumerStatefulWidget {
   final String itemId;
-  final String fallbackUrl;
-  const _DirectDetail({required this.itemId, required this.fallbackUrl});
+  const _DirectDetail({required this.itemId});
 
   @override
   ConsumerState<_DirectDetail> createState() => _DirectDetailState();
@@ -54,10 +49,8 @@ class _DirectDetailState extends ConsumerState<_DirectDetail> {
 
   Future<SavedItem?> _load() async {
     final container = ProviderScope.containerOf(context, listen: false);
-    final db = container.read(dbProviderForRetry);
     try {
-      final all = await db.list();
-      return all.where((e) => e.id == widget.itemId).firstOrNull;
+      return await container.read(dbProviderForRetry).getById(widget.itemId);
     } catch (_) {
       return null;
     }
@@ -83,7 +76,6 @@ class _DirectDetailState extends ConsumerState<_DirectDetail> {
   }
 }
 
-/// Shared scaffold pieces for both entry paths.
 class _DetailBody extends ConsumerWidget {
   final SavedItem item;
   const _DetailBody({required this.item});
@@ -91,6 +83,8 @@ class _DetailBody extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
+    final highlightsAsync = ref.watch(highlightsProvider(item.id));
+    final collectionsAsync = ref.watch(itemCollectionsProvider(item.id));
     return Scaffold(
       appBar: AppBar(
         title: Text(item.category.label),
@@ -101,12 +95,17 @@ class _DetailBody extends ConsumerWidget {
                 .share(ShareParams(text: '${item.title}\n${item.url}')),
           ),
           PopupMenuButton<ItemStatus>(
-            onSelected: (s) =>
-                ref.read(saveControllerProvider.notifier).setStatus(item.id, s),
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: ItemStatus.inbox, child: Text('Move to Inbox')),
-              PopupMenuItem(value: ItemStatus.done, child: Text('Mark Done')),
-              PopupMenuItem(value: ItemStatus.archived, child: Text('Archive')),
+            onSelected: (s) async {
+              await ref.read(saveControllerProvider.notifier).setStatus(item.id, s);
+              if (s == ItemStatus.inbox && context.mounted) Navigator.pop(context);
+            },
+            itemBuilder: (_) => [
+              if (item.status != ItemStatus.inbox)
+                const PopupMenuItem(value: ItemStatus.inbox, child: Text('Move to Inbox')),
+              if (item.status != ItemStatus.done)
+                const PopupMenuItem(value: ItemStatus.done, child: Text('Mark Done')),
+              if (item.status != ItemStatus.archived)
+                const PopupMenuItem(value: ItemStatus.archived, child: Text('Archive')),
             ],
           ),
         ],
@@ -123,10 +122,8 @@ class _DetailBody extends ConsumerWidget {
           const SizedBox(height: 12),
           Text(item.title, style: theme.textTheme.headlineSmall),
           const SizedBox(height: 6),
-          Text(
-            _sourceLine(item),
-            style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline),
-          ),
+          Text(_sourceLine(item),
+              style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline)),
           const SizedBox(height: 10),
           Wrap(
             spacing: 8,
@@ -180,6 +177,24 @@ class _DetailBody extends ConsumerWidget {
             Text(item.excerpt!,
                 style: theme.textTheme.bodyMedium?.copyWith(fontStyle: FontStyle.italic)),
           ],
+          // ---- Obsidian-style personal note ----
+          const SizedBox(height: 16),
+          _NoteCard(item: item),
+          // ---- Highlights ----
+          const SizedBox(height: 8),
+          highlightsAsync.maybeWhen(
+            data: (hs) => _HighlightsCard(item: item, highlights: hs),
+            orElse: () => const SizedBox.shrink(),
+          ),
+          // ---- Collections ----
+          const SizedBox(height: 8),
+          collectionsAsync.maybeWhen(
+            data: (ids) => _CollectionsCard(item: item, selectedIds: ids),
+            orElse: () => const SizedBox.shrink(),
+          ),
+          // ---- Reminder ----
+          const SizedBox(height: 8),
+          _ReminderCard(item: item),
           const SizedBox(height: 12),
           SelectableText(item.url, style: const TextStyle(color: Colors.blue)),
           const SizedBox(height: 24),
@@ -200,11 +215,17 @@ class _DetailBody extends ConsumerWidget {
           ),
           const SizedBox(height: 8),
           OutlinedButton.icon(
-            icon: const Icon(Icons.check),
-            label: Text(item.status == ItemStatus.done ? 'Reopen' : 'Mark done'),
+            icon: Icon(item.status == ItemStatus.archived
+                ? Icons.unarchive_outlined
+                : Icons.check),
+            label: Text(switch (item.status) {
+              ItemStatus.archived => 'Unarchive to inbox',
+              ItemStatus.done => 'Reopen',
+              ItemStatus.inbox => 'Mark done',
+            }),
             onPressed: () {
               ref.read(saveControllerProvider.notifier).setStatus(item.id,
-                  item.status == ItemStatus.done ? ItemStatus.inbox : ItemStatus.done);
+                  item.status == ItemStatus.inbox ? ItemStatus.done : ItemStatus.inbox);
               Navigator.pop(context);
             },
           ),
@@ -279,8 +300,400 @@ class _DetailBody extends ConsumerWidget {
   }
 }
 
-/// Bottom-sheet chat: ask questions about this item. AI gets title, summary,
-/// excerpt + freshly fetched article body (when available) as context.
+/// Obsidian-style note: tap to edit, markdown-lite render (bold/italic/links
+/// stripped to readable text), saved per item, fed to Ask-AI.
+class _NoteCard extends ConsumerStatefulWidget {
+  final SavedItem item;
+  const _NoteCard({required this.item});
+
+  @override
+  ConsumerState<_NoteCard> createState() => _NoteCardState();
+}
+
+class _NoteCardState extends ConsumerState<_NoteCard> {
+  bool _editing = false;
+  late final TextEditingController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController(text: widget.item.userNote ?? '');
+  }
+
+  @override
+  void didUpdateWidget(covariant _NoteCard old) {
+    super.didUpdateWidget(old);
+    if (!_editing && old.item.userNote != widget.item.userNote) {
+      _ctrl.text = widget.item.userNote ?? '';
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.edit_note_outlined, size: 18),
+                const SizedBox(width: 6),
+                Text('My note', style: theme.textTheme.titleSmall),
+                const Spacer(),
+                if (!_editing)
+                  TextButton(
+                    onPressed: () => setState(() => _editing = true),
+                    child: Text(widget.item.userNote?.isNotEmpty == true ? 'Edit' : 'Add'),
+                  ),
+              ],
+            ),
+            if (_editing) ...[
+              TextField(
+                controller: _ctrl,
+                maxLines: 5,
+                minLines: 2,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  hintText: 'Why did you save this? Key takeaway? [[link]] ideas…',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                      onPressed: () => setState(() {
+                            _editing = false;
+                            _ctrl.text = widget.item.userNote ?? '';
+                          }),
+                      child: const Text('Cancel')),
+                  FilledButton(
+                    onPressed: () async {
+                      await ref
+                          .read(saveControllerProvider.notifier)
+                          .saveNote(widget.item.id, _ctrl.text);
+                      if (mounted) setState(() => _editing = false);
+                    },
+                    child: const Text('Save'),
+                  ),
+                ],
+              ),
+            ] else ...[
+              if (widget.item.userNote?.isNotEmpty == true)
+                SelectableText(widget.item.userNote!)
+              else
+                Text('No note yet — capture why this matters.',
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: theme.colorScheme.outline)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HighlightsCard extends ConsumerWidget {
+  final SavedItem item;
+  final List<Highlight> highlights;
+  const _HighlightsCard({required this.item, required this.highlights});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.highlight_outlined, size: 18),
+                const SizedBox(width: 6),
+                Text('Highlights (${highlights.length})',
+                    style: theme.textTheme.titleSmall),
+                const Spacer(),
+                TextButton.icon(
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('Add'),
+                  onPressed: () => _addDialog(context, ref),
+                ),
+              ],
+            ),
+            if (highlights.isEmpty)
+              Text('Save key passages — Ask AI will cite them.',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.outline))
+            else
+              ...highlights.map((h) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border(
+                            left: BorderSide(
+                                color: theme.colorScheme.primary, width: 3)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SelectableText('“${h.text}”',
+                              style: theme.textTheme.bodyMedium),
+                          if (h.note?.isNotEmpty == true)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text('◦ ${h.note!}',
+                                  style: theme.textTheme.bodySmall),
+                            ),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: InkWell(
+                              child: const Padding(
+                                padding: EdgeInsets.all(4),
+                                child: Icon(Icons.delete_outline, size: 16),
+                              ),
+                              onTap: () async {
+                                await ref
+                                    .read(highlightsControllerProvider.notifier)
+                                    .remove(h.id, item.id);
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _addDialog(BuildContext context, WidgetRef ref) async {
+    final text = TextEditingController();
+    final note = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Add highlight'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+                controller: text,
+                maxLines: 4,
+                decoration: const InputDecoration(
+                    labelText: 'Passage', border: OutlineInputBorder())),
+            const SizedBox(height: 8),
+            TextField(
+                controller: note,
+                decoration: const InputDecoration(
+                    labelText: 'Note (optional)',
+                    border: OutlineInputBorder())),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Save')),
+        ],
+      ),
+    );
+    if (ok == true && text.text.trim().isNotEmpty) {
+      await ref.read(highlightsControllerProvider.notifier).add(
+            item.id,
+            text.text.trim(),
+            note: note.text.trim().isEmpty ? null : note.text.trim(),
+          );
+    }
+  }
+}
+
+class _CollectionsCard extends ConsumerWidget {
+  final SavedItem item;
+  final List<String> selectedIds;
+  const _CollectionsCard({required this.item, required this.selectedIds});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final all = ref.watch(collectionsProvider).maybeWhen(
+          data: (v) => v,
+          orElse: () => <Collection>[],
+        );
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.folder_outlined, size: 18),
+                const SizedBox(width: 6),
+                Text('Collections', style: theme.textTheme.titleSmall),
+                const Spacer(),
+                TextButton.icon(
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('New'),
+                  onPressed: () => _newCollection(context, ref),
+                ),
+              ],
+            ),
+            if (all.isEmpty)
+              Text('Group items beyond categories — e.g. Thesis, Trip, Watchlist.',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.outline))
+            else
+              Wrap(
+                spacing: 8,
+                children: all.map((c) {
+                  final sel = selectedIds.contains(c.id);
+                  return FilterChip(
+                    label: Text('${c.icon ?? '📁'} ${c.name}'),
+                    selected: sel,
+                    onSelected: (_) async {
+                      final next = [...selectedIds];
+                      if (sel) {
+                        next.remove(c.id);
+                      } else {
+                        next.add(c.id);
+                      }
+                      await ref
+                          .read(saveControllerProvider.notifier)
+                          .setCollections(item.id, next);
+                      ref.invalidate(itemCollectionsProvider(item.id));
+                    },
+                  );
+                }).toList(),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _newCollection(BuildContext context, WidgetRef ref) async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('New collection'),
+        content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            decoration: const InputDecoration(
+                hintText: 'e.g. Thesis research', border: OutlineInputBorder())),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Create')),
+        ],
+      ),
+    );
+    if (ok == true && ctrl.text.trim().isNotEmpty) {
+      await ref.read(collectionsControllerProvider.notifier).create(ctrl.text.trim());
+    }
+  }
+}
+
+class _ReminderCard extends ConsumerWidget {
+  final SavedItem item;
+  const _ReminderCard({required this.item});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final has = item.remindAt != null && item.remindAt!.isAfter(DateTime.now());
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            const Icon(Icons.alarm_outlined, size: 18),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Reminder', style: theme.textTheme.titleSmall),
+                  Text(
+                    has
+                        ? DateFormat('EEE, MMM d · h:mm a').format(item.remindAt!)
+                        : 'Nudge yourself to revisit this.',
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: theme.colorScheme.outline),
+                  ),
+                ],
+              ),
+            ),
+            if (has)
+              TextButton(
+                onPressed: () => ref
+                    .read(saveControllerProvider.notifier)
+                    .setReminder(item.id, null),
+                child: const Text('Clear'),
+              )
+            else
+              PopupMenuButton<DateTime>(
+                tooltip: 'Set reminder',
+                onSelected: (dt) => ref
+                    .read(saveControllerProvider.notifier)
+                    .setReminder(item.id, dt),
+                itemBuilder: (_) {
+                  final now = DateTime.now();
+                  final tonight =
+                      DateTime(now.year, now.month, now.day, 21, 0).isAfter(now)
+                          ? DateTime(now.year, now.month, now.day, 21, 0)
+                          : now.add(const Duration(hours: 2));
+                  final tomorrow =
+                      DateTime(now.year, now.month, now.day, 9, 0).add(const Duration(days: 1));
+                  var weekend = DateTime(now.year, now.month, now.day, 10, 0);
+                  while (weekend.weekday != DateTime.saturday ||
+                      !weekend.isAfter(now)) {
+                    weekend = weekend.add(const Duration(days: 1));
+                  }
+                  return [
+                    PopupMenuItem(
+                        value: now.add(const Duration(hours: 2)),
+                        child: const Text('In 2 hours')),
+                    PopupMenuItem(value: tonight, child: const Text('Tonight 9pm')),
+                    PopupMenuItem(value: tomorrow, child: const Text('Tomorrow 9am')),
+                    PopupMenuItem(value: weekend, child: const Text('This weekend')),
+                  ];
+                },
+                child: const Padding(
+                  padding: EdgeInsets.all(8),
+                  child: Text('Set'),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Bottom-sheet chat: Ask-AI with note + highlights + stored body in context.
 class AskAiSheet extends ConsumerStatefulWidget {
   final SavedItem item;
   const AskAiSheet({super.key, required this.item});
@@ -294,25 +707,15 @@ class _AskAiSheetState extends ConsumerState<AskAiSheet> {
   final _scroll = ScrollController();
   final _messages = <({bool mine, String text})>[];
   bool _busy = false;
-  String? _articleText;
-  bool _ctxReady = false;
 
   @override
   void initState() {
     super.initState();
     _messages.add((
       mine: false,
-      text: 'Ask me anything about "${widget.item.title}". I have its summary and page content in context.'
+      text:
+          'Ask me anything about "${widget.item.title}". I have its summary, your note and highlights in context.'
     ));
-    _loadContext();
-  }
-
-  Future<void> _loadContext() async {
-    try {
-      final meta = await LinkParser.fetchMeta(widget.item.url);
-      _articleText = meta.articleText ?? meta.description;
-    } catch (_) {}
-    if (mounted) setState(() => _ctxReady = true);
   }
 
   @override
@@ -338,11 +741,16 @@ class _AskAiSheetState extends ConsumerState<AskAiSheet> {
           history.add((q: _messages[i].text, a: _messages[i + 1].text));
         }
       }
+      // Fresh item (note may have changed) + highlights for context.
+      final container = ProviderScope.containerOf(context, listen: false);
+      final db = container.read(dbProviderForRetry);
+      final fresh = await db.getById(widget.item.id) ?? widget.item;
+      final hs = await db.highlights(widget.item.id);
       final answer = await AiService().askAboutItem(
-        item: widget.item,
+        item: fresh,
         question: q,
         history: history,
-        articleText: _articleText,
+        highlights: hs,
       );
       if (!mounted) return;
       setState(() => _messages.add((mine: false, text: answer)));
@@ -369,7 +777,7 @@ class _AskAiSheetState extends ConsumerState<AskAiSheet> {
       initialChildSize: 0.85,
       minChildSize: 0.5,
       maxChildSize: 0.95,
-      builder: (_, ctrl) => Padding(
+      builder: (_, __) => Padding(
         padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
         child: Column(
           children: [
@@ -382,11 +790,9 @@ class _AskAiSheetState extends ConsumerState<AskAiSheet> {
                   const Expanded(
                       child: Text('Ask AI',
                           style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
-                  if (!_ctxReady)
-                    const SizedBox(
-                        width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
                   IconButton(
-                      icon: const Icon(Icons.close), onPressed: () => Navigator.pop(context)),
+                      icon: const Icon(Icons.close),
+                      onPressed: () => Navigator.pop(context)),
                 ],
               ),
             ),
@@ -438,7 +844,7 @@ class _AskAiSheetState extends ConsumerState<AskAiSheet> {
                     child: TextField(
                       controller: _input,
                       decoration: const InputDecoration(
-                        hintText: 'e.g. Summarize the key points…',
+                        hintText: 'e.g. Quiz me on the key points…',
                         border: OutlineInputBorder(),
                         isDense: true,
                       ),
@@ -465,3 +871,71 @@ class _AskAiSheetState extends ConsumerState<AskAiSheet> {
 extension<T> on Iterable<T> {
   T? get firstOrNull => isEmpty ? null : first;
 }
+
+// ------------------------------------------------------- small controllers
+final highlightsProvider =
+    FutureProvider.family<List<Highlight>, String>((ref, itemId) async {
+  ref.watch(dataVersionProvider);
+  return ref.watch(_highlightsDbProvider).highlights(itemId);
+});
+
+final _highlightsDbProvider = Provider((ref) => ref.watch(dbProviderForRetry));
+
+final itemCollectionsProvider =
+    FutureProvider.family<List<String>, String>((ref, itemId) async {
+  ref.watch(dataVersionProvider);
+  return ref.watch(_highlightsDbProvider).itemCollectionIds(itemId);
+});
+
+class HighlightsController extends StateNotifier<AsyncValue<void>> {
+  final Ref _ref;
+  HighlightsController(this._ref) : super(const AsyncValue.data(null));
+
+  Future<void> add(String itemId, String text, {String? note}) async {
+    await _ref.read(dbProviderForRetry).addHighlight(Highlight(
+          id: const Uuid().v4(),
+          itemId: itemId,
+          text: text,
+          note: note,
+          createdAt: DateTime.now(),
+        ));
+    bumpData(_ref);
+    _ref.invalidate(highlightsProvider(itemId));
+  }
+
+  Future<void> remove(String highlightId, String itemId) async {
+    await _ref.read(dbProviderForRetry).deleteHighlight(highlightId);
+    bumpData(_ref);
+    _ref.invalidate(highlightsProvider(itemId));
+  }
+}
+
+final highlightsControllerProvider =
+    StateNotifierProvider<HighlightsController, AsyncValue<void>>(
+        (ref) => HighlightsController(ref));
+
+class CollectionsController extends StateNotifier<AsyncValue<void>> {
+  final Ref _ref;
+  CollectionsController(this._ref) : super(const AsyncValue.data(null));
+
+  Future<void> create(String name, {String? icon}) async {
+    final existing = await _ref.read(dbProviderForRetry).collections();
+    await _ref.read(dbProviderForRetry).upsertCollection(Collection(
+          id: const Uuid().v4(),
+          name: name,
+          icon: icon,
+          sortOrder: existing.length,
+          createdAt: DateTime.now(),
+        ));
+    bumpData(_ref);
+  }
+
+  Future<void> remove(String id) async {
+    await _ref.read(dbProviderForRetry).deleteCollection(id);
+    bumpData(_ref);
+  }
+}
+
+final collectionsControllerProvider =
+    StateNotifierProvider<CollectionsController, AsyncValue<void>>(
+        (ref) => CollectionsController(ref));
