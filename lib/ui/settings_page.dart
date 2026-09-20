@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/saved_item.dart';
+import '../services/ai_providers.dart';
 import '../services/ai_service.dart';
 import '../services/link_parser.dart';
 import '../state/providers.dart';
@@ -17,33 +18,85 @@ class SettingsPage extends ConsumerStatefulWidget {
 
 class _SettingsPageState extends ConsumerState<SettingsPage> {
   final _key = TextEditingController();
+  final _orKey = TextEditingController();
+  final _orModel = TextEditingController();
+  final _azKey = TextEditingController();
+  final _azEndpoint = TextEditingController();
+  final _azDeployment = TextEditingController();
+  final _azVersion = TextEditingController(text: '2024-10-21');
   bool _loaded = false;
   bool _obscure = true;
+  bool _orObscure = true;
+  bool _azObscure = true;
   bool _testing = false;
   String? _testResult;
   String _model = AiService.availableModels.first;
+  AiProviderKind _provider = AiProviderKind.gemini;
 
   @override
   void initState() {
     super.initState();
-    AiService().getApiKey().then((v) {
+    final ai = AiService();
+    ai.getApiKey().then((v) {
       _key.text = v ?? '';
       setState(() => _loaded = true);
     });
-    AiService().getModel().then((m) {
+    ai.getModel().then((m) {
       if (mounted) setState(() => _model = m);
+    });
+    ai.getProvider().then((p) {
+      if (mounted) setState(() => _provider = p);
+    });
+    ai.getOpenRouterKey().then((v) {
+      _orKey.text = v ?? '';
+    });
+    ai.getOpenRouterModel().then((v) {
+      _orModel.text = v;
+    });
+    ai.getAzure().then((az) {
+      _azKey.text = az.apiKey;
+      _azEndpoint.text = az.endpoint;
+      _azDeployment.text = az.deployment;
+      _azVersion.text = az.apiVersion;
     });
   }
 
   @override
   void dispose() {
     _key.dispose();
+    _orKey.dispose();
+    _orModel.dispose();
+    _azKey.dispose();
+    _azEndpoint.dispose();
+    _azDeployment.dispose();
+    _azVersion.dispose();
     super.dispose();
   }
 
   Future<void> _testKey() async {
-    final key = _key.text.trim();
-    if (key.isEmpty) {
+    final ai = AiService();
+    final provider = _provider;
+    // Persist whatever is on screen first so the probe uses it.
+    if (provider == AiProviderKind.gemini && _key.text.trim().isNotEmpty) {
+      await ai.saveApiKey(_key.text);
+    } else if (provider == AiProviderKind.openrouter) {
+      if (_orKey.text.trim().isNotEmpty) {
+        await ai.saveOpenRouterKey(_orKey.text);
+      }
+      if (_orModel.text.trim().isNotEmpty) {
+        await ai.saveOpenRouterModel(_orModel.text);
+      }
+    } else if (provider == AiProviderKind.azure) {
+      await ai.saveAzure(
+        endpoint: _azEndpoint.text,
+        deployment: _azDeployment.text,
+        apiVersion: _azVersion.text,
+        apiKey: _azKey.text,
+      );
+    }
+    if (provider == AiProviderKind.gemini && _key.text.trim().isEmpty ||
+        provider == AiProviderKind.openrouter && _orKey.text.trim().isEmpty ||
+        provider == AiProviderKind.azure && _azKey.text.trim().isEmpty) {
       setState(() => _testResult = 'Paste a key first.');
       return;
     }
@@ -52,14 +105,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       _testResult = null;
     });
     try {
-      await AiService().saveApiKey(key);
       final meta = await LinkParser.fetchMeta('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
-      final ai = AiService();
       final r = await ai.enrichWithFlag(
           url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', meta: meta);
       setState(() {
         _testResult = r.usedAi
-            ? '✓ Key works — probe categorized as "${r.enrichment.category.name}" with summary.'
+            ? '✓ ${provider.label} works — probe categorized as "${r.enrichment.category.name}" with summary.'
             : '✗ Key saved but AI failed: ${r.enrichment.error ?? 'unknown error'}';
       });
     } catch (e) {
@@ -120,91 +171,286 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          const Text('AI categorization',
+          const Text('AI provider',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
           const Text(
-              'Paste a Gemini API key (free at aistudio.google.com → Get API key). Stored only on this device. Without a key, the app uses offline rules.\n\nIf items show "offline rules" even with a key, use Test key below.'),
-          const SizedBox(height: 12),
-          if (!_loaded)
-            const Center(child: CircularProgressIndicator())
-          else
+              'Pick the backend. Keys stay on this device. Without a key for the active provider, the app uses offline rules.'),
+          const SizedBox(height: 8),
+          SegmentedButton<AiProviderKind>(
+            showSelectedIcon: false,
+            style: SegmentedButton.styleFrom(visualDensity: VisualDensity.compact),
+            segments: AiProviderKind.values
+                .map((p) => ButtonSegment(
+                    value: p,
+                    label: Text(p == AiProviderKind.gemini
+                        ? 'Gemini'
+                        : p == AiProviderKind.openrouter
+                            ? 'OpenRouter'
+                            : 'Azure')))
+                .toList(),
+            selected: {_provider},
+            onSelectionChanged: (s) async {
+              setState(() => _provider = s.first);
+              await AiService().saveProvider(s.first);
+            },
+          ),
+          const SizedBox(height: 16),
+          if (_provider == AiProviderKind.gemini) ...[
+            const Text('Google Gemini',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            const Text(
+                'Paste a Gemini API key (free at aistudio.google.com → Get API key).\n\nIf items show "offline rules" even with a key, use Test key below.'),
+            const SizedBox(height: 12),
+            if (!_loaded)
+              const Center(child: CircularProgressIndicator())
+            else
+              TextField(
+                controller: _key,
+                obscureText: _obscure,
+                decoration: InputDecoration(
+                  labelText: 'Gemini API key',
+                  border: const OutlineInputBorder(),
+                  suffixIcon: IconButton(
+                    icon: Icon(_obscure ? Icons.visibility : Icons.visibility_off),
+                    onPressed: () => setState(() => _obscure = !_obscure),
+                  ),
+                ),
+              ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton(
+                  onPressed: () async {
+                    await AiService().saveApiKey(_key.text);
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('API key saved')));
+                    }
+                  },
+                  child: const Text('Save key'),
+                ),
+                FilledButton.tonal(
+                  onPressed: _testing ? null : _testKey,
+                  child: _testing
+                      ? const SizedBox(
+                          width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text('Test key'),
+                ),
+                OutlinedButton(
+                  onPressed: () async {
+                    await AiService().clearApiKey();
+                    _key.clear();
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('API key removed — rules mode')));
+                    }
+                  },
+                  child: const Text('Remove'),
+                ),
+              ],
+            ),
+            if (_testResult != null) ...[
+              const SizedBox(height: 12),
+              Card(child: Padding(padding: const EdgeInsets.all(12), child: Text(_testResult!))),
+            ],
+            const SizedBox(height: 16),
+            const Text('Gemini model',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            const Text(
+                'Picked first for every request; the others are automatic fallbacks. 3.6 is newest, lite is cheapest/fastest.'),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String>(
+              initialValue: _model,
+              decoration: const InputDecoration(
+                  labelText: 'Preferred Gemini model',
+                  border: OutlineInputBorder()),
+              items: AiService.availableModels
+                  .map((m) => DropdownMenuItem(value: m, child: Text(m)))
+                  .toList(),
+              onChanged: (v) async {
+                if (v == null) return;
+                setState(() => _model = v);
+                await AiService().saveModel(v);
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Model set to $v')));
+                }
+              },
+            ),
+          ],
+          if (_provider == AiProviderKind.openrouter) ...[
+            const Text('OpenRouter',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            const Text(
+                'One key, 400+ models (openrouter.ai → Keys). You pick the model id yourself — e.g. google/gemini-2.5-flash, anthropic/claude-sonnet-5, deepseek/deepseek-chat. Billed by OpenRouter.'),
+            const SizedBox(height: 12),
             TextField(
-              controller: _key,
-              obscureText: _obscure,
+              controller: _orKey,
+              obscureText: _orObscure,
               decoration: InputDecoration(
-                labelText: 'Gemini API key',
+                labelText: 'OpenRouter API key (sk-or-…)',
                 border: const OutlineInputBorder(),
                 suffixIcon: IconButton(
-                  icon: Icon(_obscure ? Icons.visibility : Icons.visibility_off),
-                  onPressed: () => setState(() => _obscure = !_obscure),
+                  icon: Icon(_orObscure ? Icons.visibility : Icons.visibility_off),
+                  onPressed: () => setState(() => _orObscure = !_orObscure),
                 ),
               ),
             ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              FilledButton(
-                onPressed: () async {
-                  await AiService().saveApiKey(_key.text);
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('API key saved')));
-                  }
-                },
-                child: const Text('Save key'),
-              ),
-              FilledButton.tonal(
-                onPressed: _testing ? null : _testKey,
-                child: _testing
-                    ? const SizedBox(
-                        width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Text('Test key'),
-              ),
-              OutlinedButton(
-                onPressed: () async {
-                  await AiService().clearApiKey();
-                  _key.clear();
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('API key removed — rules mode')));
-                  }
-                },
-                child: const Text('Remove'),
-              ),
-            ],
-          ),
-          if (_testResult != null) ...[
             const SizedBox(height: 12),
-            Card(child: Padding(padding: const EdgeInsets.all(12), child: Text(_testResult!))),
+            TextField(
+              controller: _orModel,
+              decoration: const InputDecoration(
+                labelText: 'Model id',
+                hintText: OpenRouterDefaults.model,
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: OpenRouterDefaults.suggestions
+                  .take(4)
+                  .map((m) => ActionChip(
+                      label: Text(m.split('/').last,
+                          style: const TextStyle(fontSize: 11)),
+                      onPressed: () =>
+                          setState(() => _orModel.text = m)))
+                  .toList(),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton(
+                  onPressed: () async {
+                    final ai = AiService();
+                    await ai.saveOpenRouterKey(_orKey.text);
+                    await ai.saveOpenRouterModel(_orModel.text.isEmpty
+                        ? OpenRouterDefaults.model
+                        : _orModel.text);
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                              content: Text('OpenRouter saved')));
+                    }
+                  },
+                  child: const Text('Save'),
+                ),
+                FilledButton.tonal(
+                  onPressed: _testing ? null : _testKey,
+                  child: _testing
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text('Test key'),
+                ),
+              ],
+            ),
+            if (_testResult != null) ...[
+              const SizedBox(height: 12),
+              Card(
+                  child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Text(_testResult!))),
+            ],
           ],
-          const SizedBox(height: 16),
-          const Text('AI model',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 8),
-          const Text(
-              'Picked first for every request; the others are automatic fallbacks. 3.6 is newest, lite is cheapest/fastest.'),
-          const SizedBox(height: 8),
-          DropdownButtonFormField<String>(
-            initialValue: _model,
-            decoration: const InputDecoration(
-                labelText: 'Preferred Gemini model',
-                border: OutlineInputBorder()),
-            items: AiService.availableModels
-                .map((m) => DropdownMenuItem(value: m, child: Text(m)))
-                .toList(),
-            onChanged: (v) async {
-              if (v == null) return;
-              setState(() => _model = v);
-              await AiService().saveModel(v);
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Model set to $v')));
-              }
-            },
-          ),
+          if (_provider == AiProviderKind.azure) ...[
+            const Text('Azure OpenAI',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            const Text(
+                'Your own Azure resource (portal.azure.com → Azure OpenAI → Keys + Deployments). The deployment name selects the model — configure it yourself in Azure, then paste here.'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _azEndpoint,
+              decoration: const InputDecoration(
+                labelText: 'Endpoint',
+                hintText: 'https://my-resource.openai.azure.com',
+                border: OutlineInputBorder(),
+              ),
+              keyboardType: TextInputType.url,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _azDeployment,
+              decoration: const InputDecoration(
+                labelText: 'Deployment name (your model)',
+                hintText: 'e.g. gpt-4o-mini',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _azVersion,
+              decoration: const InputDecoration(
+                labelText: 'API version',
+                hintText: '2024-10-21',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _azKey,
+              obscureText: _azObscure,
+              decoration: InputDecoration(
+                labelText: 'Azure API key',
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  icon: Icon(
+                      _azObscure ? Icons.visibility : Icons.visibility_off),
+                  onPressed: () =>
+                      setState(() => _azObscure = !_azObscure),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton(
+                  onPressed: () async {
+                    await AiService().saveAzure(
+                      endpoint: _azEndpoint.text,
+                      deployment: _azDeployment.text,
+                      apiVersion: _azVersion.text,
+                      apiKey: _azKey.text,
+                    );
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                              content: Text('Azure saved')));
+                    }
+                  },
+                  child: const Text('Save'),
+                ),
+                FilledButton.tonal(
+                  onPressed: _testing ? null : _testKey,
+                  child: _testing
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text('Test key'),
+                ),
+              ],
+            ),
+            if (_testResult != null) ...[
+              const SizedBox(height: 12),
+              Card(
+                  child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Text(_testResult!))),
+            ],
+          ],
           const SizedBox(height: 16),
           const Text('Content sources',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
@@ -215,7 +461,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               child: Text(
                   'Before AI tags an item, the app now pulls real content:\n'
                   '• YouTube — title, channel, description, keywords\n'
-                  '• Reddit — post text + top 5 comments\n'
+                  '• Reddit — post text + top 5 comments (PullPush API)\n'
                   '• Instagram — caption via embed page\n'
                   'Tags are based on this content, not just the title. '
                   'No setup needed — it runs automatically at save time. '

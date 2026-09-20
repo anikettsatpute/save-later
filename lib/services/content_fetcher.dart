@@ -141,12 +141,20 @@ class ContentFetcher {
   }
 
   // ---------------------------------------------------------------- reddit
-  /// Reddit blocks all unauthenticated .json access (403 www, login-wall
-  /// old — verified 2026-09-20). Source of truth is the Arctic Shift public
-  /// archive (arctic-shift.photon-reddit.com): post selftext + top comments
-  /// by link_id. Falls back to legacy .json attempts in case Reddit opens up.
+  /// PullPush (api.pullpush.io, ex-Pushshift): direct post-by-id + comments
+  /// by link_id, no auth, CORS-open. Verified 2026-09-20: real selftext +
+  /// real comments for 1wl83mb. Arctic Shift kept as fallback (its comments
+  /// endpoint returns [] for fresh posts), legacy .json last.
   static Future<String?> _reddit(String url) async {
-    // 1. Arctic Shift: resolve post id from the URL, fetch post + comments.
+    // 1. PullPush: direct id lookup, no subreddit scan needed.
+    try {
+      final postId = _redditPostId(url);
+      if (postId != null) {
+        final pp = await _pullPush(postId);
+        if (pp?.isNotEmpty == true) return pp;
+      }
+    } catch (_) {}
+    // 2. Arctic Shift fallback.
     try {
       final postId = _redditPostId(url);
       if (postId != null) {
@@ -287,6 +295,63 @@ class ContentFetcher {
           'https://arctic-shift.photon-reddit.com/api/comments/search?link_id=t3_$postId&limit=25&sort=desc',
           timeout: const Duration(seconds: 12));
       if (res != null && res.statusCode == 200) {
+        final decoded = jsonDecode(res.body);
+        final data = decoded is Map ? decoded['data'] as List? : null;
+        if (data != null) {
+          final scored = <Map<String, dynamic>>[];
+          for (final c in data) {
+            if (c is! Map<String, dynamic>) continue;
+            final body = (c['body'] as String?)?.trim() ?? '';
+            if (body.isEmpty ||
+                body == '[removed]' ||
+                body == '[deleted]' ||
+                body.length < 30) {
+              continue;
+            }
+            scored.add(c);
+          }
+          scored.sort((a, b) =>
+              ((b['score'] as num?) ?? 0).compareTo((a['score'] as num?) ?? 0));
+          for (final c in scored.take(5)) {
+            final score = (c['score'] as num?)?.toInt() ?? 0;
+            out.add('Top comment (▲$score): ${_clip(c['body'] as String, 400)}');
+          }
+        }
+      }
+    } catch (_) {}
+    if (out.isEmpty) return null;
+    return _clip(out.join('\n\n'), 4000);
+  }
+
+  /// PullPush post + comments by direct id. Post record carries selftext,
+  /// comments carry body+score. Both verified live 2026-09-20.
+  static Future<String?> _pullPush(String postId) async {
+    final out = <String>[];
+    try {
+      final res = await _get(
+          'https://api.pullpush.io/reddit/search/submission/?id=$postId',
+          timeout: const Duration(seconds: 12));
+      if (res == null) return null;
+      final decoded = jsonDecode(res.body);
+      final data = decoded is Map ? decoded['data'] as List? : null;
+      if (data == null || data.isEmpty) return null;
+      final post = data.first as Map<String, dynamic>;
+      final selftext = (post['selftext'] as String?)?.trim() ?? '';
+      if (selftext.isNotEmpty &&
+          selftext != '[removed]' &&
+          selftext != '[deleted]') {
+        out.add('Post text: ${_clip(selftext, 2000)}');
+      }
+      final flair = (post['link_flair_text'] as String?)?.trim();
+      if (flair?.isNotEmpty == true) out.add('Flair: $flair');
+    } catch (_) {
+      return null;
+    }
+    try {
+      final res = await _get(
+          'https://api.pullpush.io/reddit/search/comment/?link_id=$postId&size=25&sort=desc',
+          timeout: const Duration(seconds: 12));
+      if (res != null) {
         final decoded = jsonDecode(res.body);
         final data = decoded is Map ? decoded['data'] as List? : null;
         if (data != null) {

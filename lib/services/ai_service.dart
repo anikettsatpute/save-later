@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/saved_item.dart';
+import 'ai_providers.dart';
 import 'content_fetcher.dart';
 import 'link_parser.dart';
 
@@ -26,9 +27,17 @@ class AiEnrichment {
 class AiService {
   static const _keyName = 'gemini_api_key';
   static const _modelName = 'gemini_model';
+  // Provider selection + per-provider credentials (user configures).
+  static const _providerName = 'ai_provider';
+  static const _orKeyName = 'openrouter_api_key';
+  static const _orModelName = 'openrouter_model';
+  static const _azKeyName = 'azure_api_key';
+  static const _azEndpointName = 'azure_endpoint';
+  static const _azDeploymentName = 'azure_deployment';
+  static const _azVersionName = 'azure_api_version';
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
 
-  /// User's preferred model, newest-first. Persisted per device.
+  /// User's preferred Gemini model, newest-first. Persisted per device.
   static const availableModels = [
     'gemini-3.6-flash',
     'gemini-2.5-flash',
@@ -44,6 +53,40 @@ class AiService {
     final m = await _read(_modelName);
     return availableModels.contains(m) ? m! : availableModels.first;
   }
+
+  // ---- provider selection ----
+  Future<AiProviderKind> getProvider() async =>
+      AiProviderKindLabel.fromStorage(await _read(_providerName));
+  Future<void> saveProvider(AiProviderKind p) => _write(_providerName, p.name);
+
+  // ---- OpenRouter ----
+  Future<void> saveOpenRouterKey(String k) => _write(_orKeyName, k.trim());
+  Future<String?> getOpenRouterKey() => _read(_orKeyName);
+  Future<void> saveOpenRouterModel(String m) => _write(_orModelName, m.trim());
+  Future<String> getOpenRouterModel() async =>
+      (await _read(_orModelName))?.trim().isNotEmpty == true
+          ? (await _read(_orModelName))!.trim()
+          : OpenRouterDefaults.model;
+
+  // ---- Azure ----
+  Future<void> saveAzure({
+    required String endpoint,
+    required String deployment,
+    required String apiVersion,
+    required String apiKey,
+  }) async {
+    await _write(_azEndpointName, endpoint.trim());
+    await _write(_azDeploymentName, deployment.trim());
+    await _write(_azVersionName, apiVersion.trim().isEmpty ? '2024-10-21' : apiVersion.trim());
+    await _write(_azKeyName, apiKey.trim());
+  }
+
+  Future<AzureConfig> getAzure() async => AzureConfig(
+        endpoint: (await _read(_azEndpointName)) ?? '',
+        deployment: (await _read(_azDeploymentName)) ?? '',
+        apiVersion: (await _read(_azVersionName)) ?? '2024-10-21',
+        apiKey: (await _read(_azKeyName)) ?? '',
+      );
 
   // flutter_secure_storage has no web implementation in this build (it
   // pulls platform channels the sandbox blocks). Web preview keeps the key
@@ -76,12 +119,17 @@ class AiService {
     required String url,
     required LinkMeta meta,
   }) async {
-    final key = await getApiKey();
-    if (key == null || key.isEmpty) {
+    final provider = await getProvider();
+    final hasCreds = switch (provider) {
+      AiProviderKind.gemini => (await getApiKey())?.isNotEmpty == true,
+      AiProviderKind.openrouter => (await getOpenRouterKey())?.isNotEmpty == true,
+      AiProviderKind.azure => (await getAzure()).isComplete,
+    };
+    if (!hasCreds) {
       return (enrichment: _rules(url, meta), usedAi: false);
     }
     try {
-      final e = await _gemini(key, url, meta);
+      final e = await _enrichVia(provider, url, meta);
       return (enrichment: e, usedAi: true);
     } catch (e) {
       final fallback = _rules(url, meta);
@@ -104,10 +152,10 @@ class AiService {
 
   String _friendlyError(Object e) {
     final s = e.toString();
-    if (s.contains('400')) return 'Gemini rejected the request (key or model?). Check Settings.';
-    if (s.contains('401') || s.contains('403')) return 'Gemini key invalid or expired. Check Settings.';
-    if (s.contains('429')) return 'Gemini quota exceeded. Try again later.';
-    if (s.contains('Timeout') || s.contains('Socket')) return 'Network timeout reaching Gemini. Saved with offline tags.';
+    if (s.contains('400')) return 'AI rejected the request (key or model?). Check Settings.';
+    if (s.contains('401') || s.contains('403')) return 'AI key invalid or expired. Check Settings.';
+    if (s.contains('429')) return 'AI quota exceeded. Try again later.';
+    if (s.contains('Timeout') || s.contains('Socket')) return 'Network timeout reaching AI. Saved with offline tags.';
     return 'AI unavailable ($s). Saved with offline tags.';
   }
 
@@ -165,7 +213,65 @@ class AiService {
     return Category.read;
   }
 
-  Future<AiEnrichment> _gemini(String key, String url, LinkMeta meta) async {
+  Future<AiEnrichment> _enrichVia(
+      AiProviderKind provider, String url, LinkMeta meta) async {
+    final prompt = await _categorizePrompt(url, meta);
+    final raw = await _complete(prompt, maxTokens: 400, temperature: 0.2);
+    return _parseEnrichment(raw, url, meta);
+  }
+
+  /// Single completion through the active provider. Gemini tries the
+  /// preferred model then fallbacks; OpenRouter/Azure use the user's config.
+  Future<String> _complete(String prompt,
+      {int maxTokens = 400, double temperature = 0.2}) async {
+    final provider = await getProvider();
+    switch (provider) {
+      case AiProviderKind.openrouter:
+        final key = (await getOpenRouterKey()) ?? '';
+        final model = await getOpenRouterModel();
+        return ProviderClients.openRouter(
+            apiKey: key,
+            model: model,
+            prompt: prompt,
+            maxTokens: maxTokens,
+            temperature: temperature);
+      case AiProviderKind.azure:
+        final az = await getAzure();
+        return ProviderClients.azure(
+            config: az,
+            prompt: prompt,
+            maxTokens: maxTokens,
+            temperature: temperature);
+      case AiProviderKind.gemini:
+        final key = (await getApiKey()) ?? '';
+        // Preferred model first, then the rest as fallbacks.
+        // gemini-2.0-flash is SHUT DOWN (verified 2026-09-20).
+        final preferred = await getModel();
+        final models = [
+          preferred,
+          ...availableModels.where((m) => m != preferred)
+        ];
+        Object? lastErr;
+        for (final model in models) {
+          try {
+            return await ProviderClients.gemini(
+                apiKey: key,
+                model: model,
+                prompt: prompt,
+                maxTokens: maxTokens,
+                temperature: temperature);
+          } catch (e) {
+            lastErr = e;
+            if (e.toString().contains('400') ||
+                e.toString().contains('401') ||
+                e.toString().contains('403')) rethrow;
+          }
+        }
+        throw lastErr ?? Exception('Gemini request failed');
+    }
+  }
+
+  Future<String> _categorizePrompt(String url, LinkMeta meta) async {
     const categories = 'Watch, Read, Listen, Movies & Shows, Learn, Ideas, Shopping, Other';
     final context = StringBuffer()
       ..writeln('URL: $url')
@@ -204,80 +310,13 @@ Tags: content topics (technologies, people, subjects named in Page content) — 
 Base tags on the Page content when present (topics, people, tech named there) — not just the title.
 
 ${context}''';
-    // Preferred model first (user picks in Settings), then the rest as
-    // fallbacks. gemini-2.0-flash is SHUT DOWN (verified 2026-09-20).
-    final preferred = await getModel();
-    final models = [preferred, ...availableModels.where((m) => m != preferred)];
-    Object? lastErr;
-    for (final model in models) {
-      try {
-        return await _geminiCall(key, model, prompt, url: url, meta: meta);
-      } catch (e) {
-        lastErr = e;
-        // Don't retry client errors (bad key) on the second model.
-        if (e.toString().contains('400') || e.toString().contains('401') || e.toString().contains('403')) rethrow;
-      }
-    }
-    throw lastErr ?? Exception('Gemini request failed');
+    return prompt;
   }
 
-  Future<AiEnrichment> _geminiCall(String key, String model, String prompt,
-      {required String url, LinkMeta? meta}) async {
-    http.Response res;
-    try {
-      res = await http
-          .post(
-            Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'contents': [
-                {
-                  'parts': [
-                    {'text': prompt}
-                  ]
-                }
-              ],
-              'generationConfig': {'temperature': 0.2, 'maxOutputTokens': 400},
-            }),
-          )
-          .timeout(const Duration(seconds: 25));
-    } on Exception catch (e) {
-      throw Exception('Network error reaching Gemini ($e)');
-    }
-    if (res.statusCode != 200) {
-      String detail = '';
-      try {
-        final err = jsonDecode(res.body) as Map<String, dynamic>;
-        detail = ': ${(err['error'] as Map?)?['message'] ?? res.body}'.toString().substring(0, 200);
-      } catch (_) {
-        // Non-JSON error body (e.g. 404 HTML for bad model id).
-        detail = ': ${res.body.substring(0, res.body.length.clamp(0, 120))}';
-      }
-      throw Exception('Gemini ${res.statusCode}$detail');
-    }
-    Map<String, dynamic> body;
-    try {
-      body = jsonDecode(res.body) as Map<String, dynamic>;
-    } catch (_) {
-      throw Exception('Gemini returned non-JSON (HTTP ${res.statusCode})');
-    }
-    final candidates = body['candidates'] as List?;
-    if (candidates == null || candidates.isEmpty) {
-      // Safety block with no candidates — surface block reason when present.
-      final feedback = body['promptFeedback']?.toString() ?? '';
-      throw Exception('Gemini blocked the request${feedback.isNotEmpty ? ' ($feedback)' : ''}');
-    }
-    final first = candidates.first;
-    if (first is! Map) throw Exception('Gemini returned malformed response');
-    final content = first['content'] as Map?;
-    final parts = content?['parts'] as List?;
-    if (parts == null || parts.isEmpty) {
-      final reason = first['finishReason'] ?? 'unknown';
-      throw Exception('Gemini returned no text (finish: $reason)');
-    }
-    var text = (parts.first is Map ? parts.first['text'] : null) as String? ?? '';
-    text = text.trim();
-    if (text.isEmpty) throw Exception('Gemini returned empty response');
+  /// Parses the model's raw text into an enrichment (shared by all providers).
+  AiEnrichment _parseEnrichment(String raw, String url, LinkMeta meta) {
+    var text = raw.trim();
+    if (text.isEmpty) throw Exception('AI returned empty response');
     // Strip accidental markdown fences.
     if (text.startsWith('```')) {
       text = text.replaceFirst(RegExp(r'^```[a-zA-Z]*\n?'), '').replaceAll(RegExp(r'\n?```\s*$'), '');
@@ -425,6 +464,7 @@ ${context}''';
 
   /// Ask a question about a saved item. Returns the answer text or throws
   /// with a friendly message. History is (question, answer) pairs.
+  /// Routes through the active provider (Gemini native, others OpenAI-chat).
   Future<String> askAboutItem({
     required SavedItem item,
     required String question,
@@ -432,9 +472,14 @@ ${context}''';
     String? articleText,
     List<Highlight> highlights = const [],
   }) async {
-    final key = await getApiKey();
-    if (key == null || key.isEmpty) {
-      throw Exception('No Gemini key. Add one in Settings first.');
+    final provider = await getProvider();
+    final hasCreds = switch (provider) {
+      AiProviderKind.gemini => (await getApiKey())?.isNotEmpty == true,
+      AiProviderKind.openrouter => (await getOpenRouterKey())?.isNotEmpty == true,
+      AiProviderKind.azure => (await getAzure()).isComplete,
+    };
+    if (!hasCreds) {
+      throw Exception('No AI key for ${provider.label}. Add one in Settings first.');
     }
     // Prefer the stored full body (saved at capture) over a live refetch.
     final body = articleText?.isNotEmpty == true
@@ -447,14 +492,61 @@ ${context}''';
       context.writeln(
           'Article content (may be truncated): ${body!.substring(0, body!.length.clamp(0, 6000))}');
     }
+    const system =
+        'You are a helpful reading companion inside a read-it-later app. Answer questions about the saved item below using its context. If the context lacks the answer, say what you can infer and what is missing. Keep answers concise.';
+    if (provider == AiProviderKind.gemini) {
+      return _askGemini(system, context.toString(), question, history);
+    }
+    final messages = <Map<String, dynamic>>[
+      {'role': 'system', 'content': '$system\n\n$context'},
+    ];
+    for (final h in history.take(6)) {
+      messages.add({'role': 'user', 'content': h.q});
+      messages.add({'role': 'assistant', 'content': h.a});
+    }
+    messages.add({'role': 'user', 'content': question});
+    try {
+      if (provider == AiProviderKind.openrouter) {
+        return await ProviderClients.chatOpenAiCompatible(
+          url: Uri.parse('https://openrouter.ai/api/v1/chat/completions'),
+          headers: {
+            'Authorization': 'Bearer ${(await getOpenRouterKey()) ?? ''}',
+            'HTTP-Referer':
+                'https://github.com/anikettsatpute/save-later',
+            'X-Title': 'Save Later',
+          },
+          messages: messages,
+        );
+      } else {
+        final az = await getAzure();
+        final base = az.endpoint.endsWith('/')
+            ? az.endpoint.substring(0, az.endpoint.length - 1)
+            : az.endpoint;
+        return await ProviderClients.chatOpenAiCompatible(
+          url: Uri.parse(
+              '$base/openai/deployments/${az.deployment}/chat/completions?api-version=${az.apiVersion}'),
+          headers: {'api-key': az.apiKey},
+          messages: messages,
+        );
+      }
+    } catch (e) {
+      throw Exception(_friendlyError(e));
+    }
+  }
+
+  /// Gemini-native multi-turn chat (existing behavior, preferred-model first).
+  Future<String> _askGemini(
+    String system,
+    String context,
+    String question,
+    List<({String q, String a})> history,
+  ) async {
+    final key = (await getApiKey()) ?? '';
     final contents = <Map<String, dynamic>>[
       {
         'role': 'user',
         'parts': [
-          {
-            'text':
-                'You are a helpful reading companion inside a read-it-later app. Answer questions about the saved item below using its context. If the context lacks the answer, say what you can infer and what is missing. Keep answers concise.\n\n$context'
-          }
+          {'text': '$system\n\n$context'}
         ]
       },
     ];
@@ -515,7 +607,6 @@ ${context}''';
         if (parts == null || parts.isEmpty) throw Exception('Gemini returned an empty answer');
         return (parts.first['text'] as String? ?? '').trim();
       } catch (e) {
-        if (e.toString().contains('No Gemini key')) rethrow;
         lastErr = e;
       }
     }

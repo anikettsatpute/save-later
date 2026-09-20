@@ -145,13 +145,18 @@ class LinkParser {
   }
 
   // ----------------------------------------------------------------- reddit
-  /// Arctic Shift archive first (public, no auth — verified 2026-09-20):
-  /// real title/author/subreddit/score/comments/selftext. Legacy oEmbed +
-  /// .json kept as fallback (both currently walled: oEmbed CORS-blocked in
-  /// browser + 404 for some posts, .json 403/login-wall). Either can fail alone.
+  /// PullPush first (direct id lookup, verified 2026-09-20): real
+  /// title/author/subreddit/score/comments/selftext. Arctic Shift second,
+  /// legacy oEmbed + .json last (both currently walled). Slug fallback so
+  /// the title is never the bare host.
   static Future<LinkMeta?> _redditRich(String url) async {
     final canonical = _canonicalReddit(url);
-    // 1. Arctic Shift: title + author + subreddit + score + selftext.
+    // 1. PullPush: title + author + subreddit + score + selftext by id.
+    try {
+      final pp = await _pullPushPost(canonical);
+      if (pp != null) return pp;
+    } catch (_) {}
+    // 2. Arctic Shift: title + author + subreddit + score + selftext.
     try {
       final arctic = await _arcticPost(canonical);
       if (arctic != null) return arctic;
@@ -200,6 +205,50 @@ class LinkParser {
       // fall through to base
     }
     return base;
+  }
+
+  /// PullPush post lookup by direct id. Same shape as Arctic (title,
+  /// author, subreddit, score, comments, selftext).
+  static Future<LinkMeta?> _pullPushPost(String canonical) async {
+    final idM = RegExp(r'/comments/([a-z0-9]+)', caseSensitive: false)
+        .firstMatch(canonical);
+    final subM = RegExp(r'/r/([A-Za-z0-9_]+)').firstMatch(canonical);
+    final postId = idM?.group(1);
+    final sub = subM?.group(1);
+    if (postId == null) return null;
+    try {
+      final res = await _get(
+          'https://api.pullpush.io/reddit/search/submission/?id=$postId',
+          timeout: const Duration(seconds: 12));
+      if (res == null) return null;
+      final decoded = jsonDecode(res.body);
+      final data = decoded is Map ? decoded['data'] as List? : null;
+      if (data == null || data.isEmpty) return null;
+      final post = data.first as Map<String, dynamic>;
+      final selftext = ((post['selftext'] as String?) ?? '').trim();
+      final title = ((post['title'] as String?) ?? '').trim();
+      if (title.isEmpty) return null;
+      return LinkMeta(
+        title: title,
+        type: ItemType.reddit,
+        author: post['author'] as String?,
+        thumbnailUrl: _validThumb(post['thumbnail'] as String?),
+        description:
+            selftext.isNotEmpty && selftext != '[removed]' && selftext != '[deleted]'
+                ? selftext
+                : null,
+        siteName: 'Reddit',
+        subreddit: (post['subreddit'] as String?) ?? sub,
+        redditScore: (post['score'] as num?)?.toInt(),
+        redditComments: (post['num_comments'] as num?)?.toInt(),
+        articleText:
+            selftext.isNotEmpty && selftext != '[removed]' && selftext != '[deleted]'
+                ? _clip(selftext, 2000)
+                : null,
+      );
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Arctic Shift post lookup: subreddit newest-100 scan, client-side id
