@@ -876,17 +876,27 @@ class _ItemCard extends ConsumerWidget {
                         ),
                       ],
                       const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 6,
-                        runSpacing: 4,
-                        crossAxisAlignment: WrapCrossAlignment.center,
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
-                          _badge(context, item.category.label, Icons.folder_outlined),
-                          ..._signalBadges(context, item),
-                          ...item.tags
-                              .take(2)
-                              .map((t) => Text('#$t', style: theme.textTheme.bodySmall)),
-                          const Spacer(),
+                          Expanded(
+                            child: Wrap(
+                              spacing: 6,
+                              runSpacing: 4,
+                              crossAxisAlignment:
+                                  WrapCrossAlignment.center,
+                              children: [
+                                _badge(context, item.category.label,
+                                    Icons.folder_outlined),
+                                ..._signalBadges(context, item),
+                                ...item.tags.take(2).map((t) => Text(
+                                    '#$t',
+                                    style:
+                                        theme.textTheme.bodySmall)),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 6),
                           _reminderDot(item),
                           _aiDot(context, item),
                         ],
