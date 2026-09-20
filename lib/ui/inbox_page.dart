@@ -7,6 +7,7 @@ import '../models/saved_item.dart';
 import '../state/providers.dart';
 import 'add_sheet.dart';
 import 'detail_page.dart';
+import 'login_page.dart';
 import 'settings_page.dart';
 
 /// v4 inbox (Raindrop-inspired): nav drawer (status + collections),
@@ -215,6 +216,8 @@ class _NavDrawer extends ConsumerWidget {
                 ],
               ),
             ),
+            const AccountTile(),
+            const Divider(),
             _dest(context, ref, filter, Icons.inbox_outlined, 'Inbox',
                 counts == null ? null : counts.inbox,
                 filter.status == ItemStatus.inbox && filter.collectionId == null,

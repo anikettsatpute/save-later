@@ -1,14 +1,46 @@
-import 'package:flutter/foundation.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 
+import 'firebase_options.dart';
+import 'services/auth_service.dart';
 import 'services/share_parser.dart';
 import 'ui/add_sheet.dart';
 import 'ui/inbox_page.dart';
 
-void main() {
-  runApp(const ProviderScope(child: SaveLaterApp()));
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Cloud sync is optional: without `flutterfire configure` output (or on
+  // Linux/Windows, where the Firestore SDK doesn't exist) the app runs
+  // local-only and hides sign-in UI. See FIREBASE_SETUP.md.
+  var firebaseReady = false;
+  if (supportsCloudSync) {
+    try {
+      try {
+        await Firebase.initializeApp(
+            options: DefaultFirebaseOptions.currentPlatform);
+      } catch (_) {
+        // No generated options yet — fall back to native config files
+        // (google-services.json / GoogleService-Info.plist).
+        await Firebase.initializeApp();
+      }
+      try {
+        FirebaseFirestore.instance.settings =
+            const Settings(persistenceEnabled: true);
+      } catch (_) {
+        // Settings can only be set before first use — ignore otherwise.
+      }
+      firebaseReady = true;
+    } catch (_) {
+      firebaseReady = false;
+    }
+  }
+  runApp(ProviderScope(overrides: [
+    firebaseReadyProvider.overrideWith((_) => firebaseReady),
+  ], child: const SaveLaterApp()));
 }
 
 class SaveLaterApp extends StatefulWidget {

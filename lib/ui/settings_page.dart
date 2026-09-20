@@ -7,6 +7,7 @@ import '../services/ai_providers.dart';
 import '../services/ai_service.dart';
 import '../services/link_parser.dart';
 import '../state/providers.dart';
+import 'login_page.dart';
 
 /// Settings v4: Gemini key + test, retry-AI, auto-tag rules manager
 /// (Obsidian-template-style capture pipeline), about.
@@ -171,6 +172,22 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          const Text('Account & sync',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          const Card(
+            child: Padding(
+              padding: EdgeInsets.all(4),
+              child: AccountTile(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          const SyncNowButton(),
+          const SizedBox(height: 8),
+          const Text(
+              'Sign in with Google to access saves on web + phone. '
+              'AI keys stay on this device and never sync.'),
+          const SizedBox(height: 24),
           const Text('AI provider',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),

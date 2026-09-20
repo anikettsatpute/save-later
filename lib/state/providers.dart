@@ -2,10 +2,12 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
+import '../data/cloud_store.dart';
 import '../data/database.dart';
 import '../data/web_store.dart';
 import '../models/saved_item.dart';
 import '../services/ai_service.dart';
+import '../services/auth_service.dart';
 import '../services/link_parser.dart';
 import '../services/reminder_service.dart';
 import '../services/share_parser.dart';
@@ -15,20 +17,40 @@ final _webProvider = Provider((_) => WebStore());
 final _aiProvider = Provider((_) => AiService());
 const _uuid = Uuid();
 
-/// Exposed for Settings retry path + detail direct-load.
-/// Web preview uses the in-memory store (sqlite wasm is blocked in the
-/// sandboxed browser); mobile uses sqflite. Same method names, dynamic
-/// dispatch keeps call sites unchanged.
-final dbProviderForRetry = Provider<dynamic>((ref) =>
-    kIsWeb ? ref.watch(_webProvider) : ref.watch(_dbProvider));
+/// Local on-device store: sqflite on mobile, in-memory on web.
+/// (Web uses memory because the sqlite wasm build is blocked in the
+/// sandboxed browser; mobile uses sqflite. Same method names.)
+final localStoreProvider = Provider<Object>(
+    (ref) => kIsWeb ? ref.watch(_webProvider) : ref.watch(_dbProvider));
 
-/// Reads the right store inside providers (kIsWeb can't be a provider dep
-/// issue — both are cheap singletons).
+/// Cloud store when signed in with Google (null otherwise). Firestore SDKs
+/// only exist for Android / iOS / macOS / web — Linux + Windows desktop
+/// builds always stay local.
+final cloudStoreProvider = Provider<FirestoreStore?>((ref) {
+  if (!supportsCloudSync) return null;
+  if (!ref.watch(firebaseReadyProvider)) return null;
+  final user = ref.watch(authStateProvider).valueOrNull;
+  if (user == null) return null;
+  return FirestoreStore(uid: user.uid);
+});
+
+/// Active store: cloud when signed in, local otherwise. All existing call
+/// sites (inbox, detail, settings, save flow) go through this, so sign-in
+/// just flips the source with no UI changes.
+///
+/// PRIVACY: only library content syncs (items, notes, highlights,
+/// collections, rules). AI provider keys stay in secure storage /
+/// SharedPreferences on each device and are never written to Firestore.
+final dbProviderForRetry = Provider<dynamic>((ref) =>
+    (ref.watch(cloudStoreProvider) as Object?) ?? ref.watch(localStoreProvider));
+
+/// Reads the right store inside providers (both are cheap singletons;
+/// watching here re-runs queries on sign-in/out so the UI flips stores).
 dynamic _store(Ref ref) =>
-    kIsWeb ? ref.watch(_webProvider) : ref.watch(_dbProvider);
+    (ref.watch(cloudStoreProvider) as Object?) ?? ref.watch(localStoreProvider);
 
 dynamic _storeRead(Ref ref) =>
-    kIsWeb ? ref.read(_webProvider) : ref.read(_dbProvider);
+    (ref.read(cloudStoreProvider) as Object?) ?? ref.read(localStoreProvider);
 
 /// Item id to navigate to (set by save sheet "View" action, consumed by inbox).
 final navigateToItemProvider = StateProvider<String?>((_) => null);
@@ -91,7 +113,10 @@ final dataVersionProvider = StateProvider<int>((_) => 0);
 void _bumpData(Ref ref) => ref.read(dataVersionProvider.notifier).state++;
 
 /// Public alias so UI controllers (highlights/collections) can bump.
-void bumpData(Ref ref) => _bumpData(ref);
+/// Accepts either Ref (controllers) or WidgetRef (widgets) — both expose
+/// read() for the version counter.
+void bumpData(dynamic ref) =>
+    (ref as dynamic).read(dataVersionProvider.notifier).state++;
 
 /// Persisted view density (list/grid/headlines), Raindrop-style.
 final viewModeProvider = StateProvider<ViewMode>((_) => ViewMode.list);

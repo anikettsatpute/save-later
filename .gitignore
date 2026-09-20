@@ -39,6 +39,13 @@ app.*.symbols
 # Obfuscation related
 app.*.map.json
 
+# Firebase native config (per-developer files — see FIREBASE_SETUP.md).
+# Note: lib/firebase_options.dart is PUBLIC config (apiKey is an identifier,
+# not a secret) and IS committed once `flutterfire configure` generates it.
+android/app/google-services.json
+ios/Runner/GoogleService-Info.plist
+macos/Runner/GoogleService-Info.plist
+
 # Android Studio will place build artifacts here
 /android/app/debug
 /android/app/profile
