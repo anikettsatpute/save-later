@@ -1,8 +1,19 @@
-# save_later
+# Save Later
 
-A new Flutter project.
+Save anything — YouTube, Reddit, articles, movies — and find it later. AI auto-categorized.
 
-## Getting Started
+## Use it
+
+- **Web app:** https://save-later-2245.web.app/ — sign in with Google, saves sync with your phone.
+- **Android app:** [Download APK (v2.6.0)](https://github.com/anikettsatpute/save-later/releases/download/v2.6.0/app-debug.apk) — install, allow unknown apps, sign in with the same Google account.
+
+## Sync & privacy
+
+- Google sign-in + Cloud Firestore. Only library content syncs (items, notes, highlights, collections, rules).
+- AI provider keys (Gemini / OpenRouter / Azure) stay on each device and are never uploaded.
+- Setup details: [FIREBASE_SETUP.md](FIREBASE_SETUP.md).
+
+## Getting Started (developers)
 
 This project is a starting point for a Flutter application.
 
