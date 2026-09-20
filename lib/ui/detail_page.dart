@@ -83,7 +83,6 @@ class _DetailBody extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
-    final highlightsAsync = ref.watch(highlightsProvider(item.id));
     final collectionsAsync = ref.watch(itemCollectionsProvider(item.id));
     return Scaffold(
       appBar: AppBar(
@@ -183,12 +182,6 @@ class _DetailBody extends ConsumerWidget {
           // ---- Obsidian-style personal note ----
           const SizedBox(height: 16),
           _NoteCard(item: item),
-          // ---- Highlights ----
-          const SizedBox(height: 8),
-          highlightsAsync.maybeWhen(
-            data: (hs) => _HighlightsCard(item: item, highlights: hs),
-            orElse: () => const SizedBox.shrink(),
-          ),
           // ---- Collections ----
           const SizedBox(height: 8),
           collectionsAsync.maybeWhen(
@@ -422,128 +415,6 @@ class _NoteCardState extends ConsumerState<_NoteCard> {
   }
 }
 
-class _HighlightsCard extends ConsumerWidget {
-  final SavedItem item;
-  final List<Highlight> highlights;
-  const _HighlightsCard({required this.item, required this.highlights});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.highlight_outlined, size: 18),
-                const SizedBox(width: 6),
-                Text('Highlights (${highlights.length})',
-                    style: theme.textTheme.titleSmall),
-                const Spacer(),
-                TextButton.icon(
-                  icon: const Icon(Icons.add, size: 16),
-                  label: const Text('Add'),
-                  onPressed: () => _addDialog(context, ref),
-                ),
-              ],
-            ),
-            if (highlights.isEmpty)
-              Text('Save key passages — Ask AI will cite them.',
-                  style: theme.textTheme.bodySmall
-                      ?.copyWith(color: theme.colorScheme.outline))
-            else
-              ...highlights.map((h) => Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: theme.colorScheme.surfaceContainerHighest,
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border(
-                            left: BorderSide(
-                                color: theme.colorScheme.primary, width: 3)),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          SelectableText('“${h.text}”',
-                              style: theme.textTheme.bodyMedium),
-                          if (h.note?.isNotEmpty == true)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 4),
-                              child: Text('◦ ${h.note!}',
-                                  style: theme.textTheme.bodySmall),
-                            ),
-                          Align(
-                            alignment: Alignment.centerRight,
-                            child: InkWell(
-                              child: const Padding(
-                                padding: EdgeInsets.all(4),
-                                child: Icon(Icons.delete_outline, size: 16),
-                              ),
-                              onTap: () async {
-                                await ref
-                                    .read(highlightsControllerProvider.notifier)
-                                    .remove(h.id, item.id);
-                              },
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  )),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _addDialog(BuildContext context, WidgetRef ref) async {
-    final text = TextEditingController();
-    final note = TextEditingController();
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Add highlight'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-                controller: text,
-                maxLines: 4,
-                decoration: const InputDecoration(
-                    labelText: 'Passage', border: OutlineInputBorder())),
-            const SizedBox(height: 8),
-            TextField(
-                controller: note,
-                decoration: const InputDecoration(
-                    labelText: 'Note (optional)',
-                    border: OutlineInputBorder())),
-          ],
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Save')),
-        ],
-      ),
-    );
-    if (ok == true && text.text.trim().isNotEmpty) {
-      await ref.read(highlightsControllerProvider.notifier).add(
-            item.id,
-            text.text.trim(),
-            note: note.text.trim().isEmpty ? null : note.text.trim(),
-          );
-    }
-  }
-}
-
 class _CollectionsCard extends ConsumerWidget {
   final SavedItem item;
   final List<String> selectedIds;
@@ -630,7 +501,14 @@ class _CollectionsCard extends ConsumerWidget {
       ),
     );
     if (ok == true && ctrl.text.trim().isNotEmpty) {
-      await ref.read(collectionsControllerProvider.notifier).create(ctrl.text.trim());
+      // New collection attaches to THIS item immediately (user expectation).
+      final newId = await ref
+          .read(collectionsControllerProvider.notifier)
+          .create(ctrl.text.trim());
+      await ref
+          .read(saveControllerProvider.notifier)
+          .setCollections(item.id, [...selectedIds, newId]);
+      ref.invalidate(itemCollectionsProvider(item.id));
     }
   }
 }
@@ -712,7 +590,7 @@ class _ReminderCard extends ConsumerWidget {
   }
 }
 
-/// Bottom-sheet chat: Ask-AI with note + highlights + stored body in context.
+/// Bottom-sheet chat: Ask-AI with note + stored body in context.
 class AskAiSheet extends ConsumerStatefulWidget {
   final SavedItem item;
   const AskAiSheet({super.key, required this.item});
@@ -733,7 +611,7 @@ class _AskAiSheetState extends ConsumerState<AskAiSheet> {
     _messages.add((
       mine: false,
       text:
-          'Ask me anything about "${widget.item.title}". I have its summary, your note and highlights in context.'
+          'Ask me anything about "${widget.item.title}". I have its summary and your note in context.'
     ));
   }
 
@@ -760,16 +638,15 @@ class _AskAiSheetState extends ConsumerState<AskAiSheet> {
           history.add((q: _messages[i].text, a: _messages[i + 1].text));
         }
       }
-      // Fresh item (note may have changed) + highlights for context.
+      // Fresh item (note may have changed) for context.
       final container = ProviderScope.containerOf(context, listen: false);
       final db = container.read(dbProviderForRetry);
       final fresh = await db.getById(widget.item.id) ?? widget.item;
-      final hs = await db.highlights(widget.item.id);
       final answer = await AiService().askAboutItem(
         item: fresh,
         question: q,
         history: history,
-        highlights: hs,
+        highlights: const [],
       );
       if (!mounted) return;
       setState(() => _messages.add((mine: false, text: answer)));
@@ -937,16 +814,19 @@ class CollectionsController extends StateNotifier<AsyncValue<void>> {
   final Ref _ref;
   CollectionsController(this._ref) : super(const AsyncValue.data(null));
 
-  Future<void> create(String name, {String? icon}) async {
+  /// Creates a collection and returns its id (so callers can auto-attach).
+  Future<String> create(String name, {String? icon}) async {
     final existing = await _ref.read(dbProviderForRetry).collections();
+    final id = const Uuid().v4();
     await _ref.read(dbProviderForRetry).upsertCollection(Collection(
-          id: const Uuid().v4(),
+          id: id,
           name: name,
           icon: icon,
           sortOrder: existing.length,
           createdAt: DateTime.now(),
         ));
     bumpData(_ref);
+    return id;
   }
 
   Future<void> remove(String id) async {

@@ -96,35 +96,26 @@ class _AddSheetState extends ConsumerState<AddSheet> {
                   ? null
                   : () async {
                       final ctrl = ref.read(saveControllerProvider.notifier);
-                      // Capture everything needed for the post-save snackbar
-                      // BEFORE popping: after pop, this context is dead and
-                      // ScaffoldMessenger/View silently do nothing.
-                      final messenger = ScaffoldMessenger.of(context);
-                      final navigator = Navigator.of(context);
                       final result = await ctrl.saveUrl(_url.text,
                           note: _note.text.trim().isEmpty ? null : _note.text.trim());
+                      if (!context.mounted) return;
                       if (result.error != null && result.itemId == null) {
                         // Fatal: nothing saved, keep sheet open so user can fix.
-                        messenger.showSnackBar(SnackBar(content: Text(result.error!)));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text(result.error!)));
                       } else {
                         // Saved (possibly with AI warning, possibly duplicate).
-                        // Close first, then show the snackbar from the parent.
-                        navigator.pop();
+                        // Hand the result to the inbox: it owns the snackbar
+                        // (sheet context dies on pop — that was the sticky bug).
+                        final itemId = result.itemId;
                         final msg = result.error ??
                             result.aiError ??
                             'Saved ✓ ${result.usedAi ? '(AI)' : '(offline rules)'}';
-                        messenger.showSnackBar(SnackBar(
-                          content: Text(msg),
-                          duration: const Duration(seconds: 8),
-                          action: result.itemId != null
-                              ? SnackBarAction(
-                                  label: 'View',
-                                  onPressed: () => ref
-                                      .read(navigateToItemProvider.notifier)
-                                      .state = result.itemId,
-                                )
-                              : null,
-                        ));
+                        Navigator.pop(context);
+                        if (itemId != null) {
+                          ref.read(navigateToItemProvider.notifier).state = itemId;
+                        }
+                        ref.read(pendingSaveMessageProvider.notifier).state = msg;
                       }
                     },
             ),

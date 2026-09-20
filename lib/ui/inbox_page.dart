@@ -32,6 +32,18 @@ class InboxPage extends ConsumerWidget {
             context, MaterialPageRoute(builder: (_) => DetailPage(itemId: next, url: '')));
       });
     });
+    // Post-save toast owned by the inbox scaffold: auto-dismisses in 4s,
+    // and "View" navigates immediately (fixes the sticky white banner).
+    ref.listen<String?>(pendingSaveMessageProvider, (prev, next) {
+      if (next == null || next == prev) return;
+      ref.read(pendingSaveMessageProvider.notifier).state = null;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          content: Text(next),
+          duration: const Duration(seconds: 4),
+        ));
+    });
     return Scaffold(
       appBar: AppBar(
         title: const Text('Save Later'),

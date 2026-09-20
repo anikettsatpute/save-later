@@ -76,7 +76,12 @@ class AiService {
       ItemType.movie => Category.moviesShows,
       _ => _guessFromText('${meta.title} ${meta.description ?? ''} ${meta.siteName ?? ''}'),
     };
-    final summary = (meta.excerpt ?? meta.description ?? '').trim();
+    // Never leave the summary empty: fall back to a human sentence built
+    // from whatever the parser did get (fixes "Saved link" cards).
+    var summary = (meta.excerpt ?? meta.description ?? '').trim();
+    if (summary.isEmpty) {
+      summary = _describeFromMeta(url, meta);
+    }
     final tags = <String>{type.name};
     if (meta.subreddit != null) tags.add('r/${meta.subreddit}');
     if (meta.siteName != null && meta.siteName!.isNotEmpty) {
@@ -87,6 +92,21 @@ class AiService {
       summary: summary.length > 220 ? '${summary.substring(0, 220)}…' : summary,
       tags: tags.take(3).toList(),
     );
+  }
+
+  /// Human fallback when the parser found no excerpt/description at all
+  /// (YouTube oEmbed fail, Google Feed redirect, JS-heavy pages).
+  String _describeFromMeta(String url, LinkMeta meta) {
+    final host = Uri.tryParse(url)?.host.replaceFirst('www.', '') ?? '';
+    final who = meta.author?.isNotEmpty == true ? ' by ${meta.author}' : '';
+    return switch (meta.type) {
+      ItemType.youtube => 'YouTube video$who — “${meta.title}”. Open to watch.',
+      ItemType.reddit => 'Reddit post$who${meta.subreddit != null ? ' in r/${meta.subreddit}' : ''} — “${meta.title}”.',
+      ItemType.instagram => 'Instagram post$who. Open in Instagram to view.',
+      ItemType.tiktok => 'TikTok video$who. Open to watch.',
+      ItemType.movie => 'Movie/show page — “${meta.title}” ($host).',
+      _ => host.isNotEmpty ? 'Article from $host — “${meta.title}”.' : 'Saved link — “${meta.title}”.',
+    };
   }
 
   Category _guessFromText(String text) {
@@ -133,7 +153,7 @@ ${context}''';
     Object? lastErr;
     for (final model in models) {
       try {
-        return await _geminiCall(key, model, prompt, url: url);
+        return await _geminiCall(key, model, prompt, url: url, meta: meta);
       } catch (e) {
         lastErr = e;
         // Don't retry client errors (bad key) on the second model.
@@ -144,7 +164,7 @@ ${context}''';
   }
 
   Future<AiEnrichment> _geminiCall(String key, String model, String prompt,
-      {required String url}) async {
+      {required String url, LinkMeta? meta}) async {
     http.Response res;
     try {
       res = await http
@@ -214,7 +234,7 @@ ${context}''';
       // failing the whole save.
       return AiEnrichment(
         category: _guessFromText('$url-fallback $text'),
-        summary: _cleanProse(text),
+        summary: _cleanProse(text, url, meta),
         tags: const [],
       );
     }
@@ -224,7 +244,7 @@ ${context}''';
     } catch (_) {
       return AiEnrichment(
         category: Category.read,
-        summary: _cleanProse(text),
+        summary: _cleanProse(text, url, meta),
         tags: const [],
       );
     }
@@ -236,7 +256,7 @@ ${context}''';
         summary == '...' ||
         RegExp(r'^\{.*"category"').hasMatch(summary) ||
         summary.contains('"summary"')) {
-      summary = _cleanProse(text);
+      summary = _cleanProse(text, url, meta);
     }
     return AiEnrichment(
       category: _parseCategory(parsed['category'] as String?),
@@ -284,7 +304,7 @@ ${context}''';
 
   /// Strips JSON scaffolding from prose so the summary field never shows raw
   /// `{"category": ...}` text to the user.
-  String _cleanProse(String text) {
+  String _cleanProse(String text, String url, LinkMeta? meta) {
     var t = text.trim();
     // Remove a leading prose intro up to the JSON block.
     final js = t.indexOf('{');
@@ -293,7 +313,12 @@ ${context}''';
     t = t.replaceAll(RegExp(r'```[a-zA-Z]*'), '').replaceAll('```', '');
     t = t.replaceAll(RegExp(r'\{"category".*$', dotAll: true), '').trim();
     t = t.replaceAll(RegExp(r'\s+'), ' ').trim();
-    if (t.isEmpty) return 'Saved link';
+    // Never return the bare placeholder: callers pass url/meta context so
+    // we can at least describe the link (fixes "Saved link" summaries).
+    if (t.isEmpty || t == 'Saved link') {
+      if (meta != null) return _describeFromMeta(url, meta);
+      return 'Saved link — $url';
+    }
     return t.length > 220 ? '${t.substring(0, 220)}…' : t;
   }
 

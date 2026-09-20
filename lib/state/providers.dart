@@ -142,6 +142,10 @@ enum SavePhase { idle, fetching, ai, saving }
 
 final savePhaseProvider = StateProvider<SavePhase>((_) => SavePhase.idle);
 
+/// Post-save toast message owned by the inbox scaffold (auto-dismisses).
+/// Set by AddSheet after pop; consumed once by InboxPage listener.
+final pendingSaveMessageProvider = StateProvider<String?>((_) => null);
+
 class SaveResult {
   final String? error;
   final String? aiError;
@@ -196,7 +200,15 @@ class SaveController extends StateNotifier<AsyncValue<void>> {
         type: meta.type,
         thumbnailUrl: meta.thumbnailUrl,
         author: meta.author,
-        summary: enrichment.summary.isNotEmpty ? enrichment.summary : meta.description,
+        // Triple fallback chain: AI summary -> parser description/excerpt ->
+        // synthesized sentence (never store empty/"Saved link").
+        summary: enrichment.summary.isNotEmpty && enrichment.summary != 'Saved link'
+            ? enrichment.summary
+            : (meta.description?.isNotEmpty == true
+                ? meta.description
+                : (meta.excerpt?.isNotEmpty == true
+                    ? meta.excerpt
+                    : '${meta.siteName ?? 'Link'} — ${meta.title}')),
         category: ruleHit?.category ?? enrichment.category,
         tags: tags,
         createdAt: DateTime.now(),

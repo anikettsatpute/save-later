@@ -100,15 +100,35 @@ class LinkParser {
   // ---------------------------------------------------------------- youtube
   static Future<LinkMeta?> _youtubeOembed(String url) async {
     final endpoint = 'https://www.youtube.com/oembed?url=${Uri.encodeComponent(url)}&format=json';
-    final res = await http.get(Uri.parse(endpoint)).timeout(const Duration(seconds: 10));
-    if (res.statusCode != 200) return null;
-    final j = jsonDecode(res.body) as Map<String, dynamic>;
+    try {
+      final res = await http.get(Uri.parse(endpoint)).timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        final j = jsonDecode(res.body) as Map<String, dynamic>;
+        final videoId = _extractYoutubeId(url);
+        final author = j['author_name'] as String?;
+        return LinkMeta(
+          title: (j['title'] as String?) ?? _fallbackTitle(url),
+          type: ItemType.youtube,
+          author: author,
+          thumbnailUrl: videoId != null ? 'https://i.ytimg.com/vi/$videoId/hqdefault.jpg' : null,
+          // oEmbed has no description — synthesize one so the summary
+          // field never ends up as bare "Saved link".
+          description: author?.isNotEmpty == true
+              ? 'YouTube video by $author. Open to watch.'
+              : 'YouTube video. Open to watch.',
+          siteName: 'YouTube',
+          isVideo: true,
+        );
+      }
+    } catch (_) {}
+    // oEmbed blocked/failed (Shorts, embeds disabled, no network): still
+    // return a usable meta with thumbnail so the card isn't empty.
     final videoId = _extractYoutubeId(url);
     return LinkMeta(
-      title: (j['title'] as String?) ?? _fallbackTitle(url),
+      title: _fallbackTitle(url),
       type: ItemType.youtube,
-      author: j['author_name'] as String?,
       thumbnailUrl: videoId != null ? 'https://i.ytimg.com/vi/$videoId/hqdefault.jpg' : null,
+      description: 'YouTube video. Open to watch.',
       siteName: 'YouTube',
       isVideo: true,
     );
