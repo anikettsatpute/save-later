@@ -21,6 +21,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   bool _obscure = true;
   bool _testing = false;
   String? _testResult;
+  String _model = AiService.availableModels.first;
 
   @override
   void initState() {
@@ -28,6 +29,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     AiService().getApiKey().then((v) {
       _key.text = v ?? '';
       setState(() => _loaded = true);
+    });
+    AiService().getModel().then((m) {
+      if (mounted) setState(() => _model = m);
     });
   }
 
@@ -176,6 +180,48 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             const SizedBox(height: 12),
             Card(child: Padding(padding: const EdgeInsets.all(12), child: Text(_testResult!))),
           ],
+          const SizedBox(height: 16),
+          const Text('AI model',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          const Text(
+              'Picked first for every request; the others are automatic fallbacks. 3.6 is newest, lite is cheapest/fastest.'),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            initialValue: _model,
+            decoration: const InputDecoration(
+                labelText: 'Preferred Gemini model',
+                border: OutlineInputBorder()),
+            items: AiService.availableModels
+                .map((m) => DropdownMenuItem(value: m, child: Text(m)))
+                .toList(),
+            onChanged: (v) async {
+              if (v == null) return;
+              setState(() => _model = v);
+              await AiService().saveModel(v);
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Model set to $v')));
+              }
+            },
+          ),
+          const SizedBox(height: 16),
+          const Text('Content sources',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          const Card(
+            child: Padding(
+              padding: EdgeInsets.all(12),
+              child: Text(
+                  'Before AI tags an item, the app now pulls real content:\n'
+                  '• YouTube — title, channel, description, keywords\n'
+                  '• Reddit — post text + top 5 comments\n'
+                  '• Instagram — caption via embed page\n'
+                  'Tags are based on this content, not just the title. '
+                  'No setup needed — it runs automatically at save time. '
+                  'Instagram often blocks anonymous access, so captions may be missing there.'),
+            ),
+          ),
           const SizedBox(height: 24),
           const Text('Library',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),

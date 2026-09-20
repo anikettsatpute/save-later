@@ -4,6 +4,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 
 import '../models/saved_item.dart';
+import 'content_fetcher.dart';
 import 'link_parser.dart';
 
 /// AI enrichment result: category + summary + tags.
@@ -22,11 +23,25 @@ class AiEnrichment {
 /// silently falling back, so users know the key/quota is the problem.
 class AiService {
   static const _keyName = 'gemini_api_key';
+  static const _modelName = 'gemini_model';
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
+
+  /// User's preferred model, newest-first. Persisted per device.
+  static const availableModels = [
+    'gemini-3.6-flash',
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
+  ];
 
   Future<void> saveApiKey(String key) => _storage.write(key: _keyName, value: key.trim());
   Future<String?> getApiKey() => _storage.read(key: _keyName);
   Future<void> clearApiKey() => _storage.delete(key: _keyName);
+
+  Future<void> saveModel(String model) => _storage.write(key: _modelName, value: model);
+  Future<String> getModel() async {
+    final m = await _storage.read(key: _modelName);
+    return availableModels.contains(m) ? m! : availableModels.first;
+  }
 
   /// Returns (enrichment, usedAi). `usedAi` false means rules fallback.
   Future<({AiEnrichment enrichment, bool usedAi})> enrichWithFlag({
@@ -138,18 +153,27 @@ class AiService {
     } else if (meta.description?.isNotEmpty == true) {
       context.writeln('Description: ${meta.description!.substring(0, meta.description!.length.clamp(0, 800))}');
     }
+    // Content fetchers (YouTube/Reddit/Instagram): real post text so tags
+    // come from CONTENT, not just the title. Best-effort, skipped on failure.
+    try {
+      final content = await ContentFetcher.fetchFor(url, meta.type.name);
+      if (content?.isNotEmpty == true) {
+        context.writeln('Page content: ${content!.substring(0, content.length.clamp(0, 3000))}');
+      }
+    } catch (_) {}
     final prompt = '''
 You categorize saved links for a read-it-later app. Reply with ONLY valid JSON, no markdown fences:
 {"category": "<one of: $categories>", "summary": "<1-2 line plain-language summary of what this is and why it matters>", "tags": ["<up to 3 lowercase tags>"]}
 
 Rules: YouTube/music videos -> Watch. Podcasts/audio -> Listen. Movies/series/IMDb -> Movies & Shows. Tutorials/docs/courses -> Learn. Products/deals -> Shopping. Reddit threads/discussions/opinion -> Ideas or Read based on content. News/articles/blogs -> Read. Default Other only if nothing fits.
 
+Base tags on the Page content when present (topics, people, tech named there) — not just the title.
+
 ${context}''';
-    // Model list (verified 2026-09-20 against ai.google.dev/gemini-api/docs/models):
-    // gemini-2.0-flash is SHUT DOWN; gemini-2.5-flash-lite exists but some keys
-    // are restricted to newer generations. Primary: gemini-3.6-flash (stable),
-    // fallbacks: gemini-2.5-flash (stable), gemini-2.5-flash-lite (cheapest).
-    const models = ['gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+    // Preferred model first (user picks in Settings), then the rest as
+    // fallbacks. gemini-2.0-flash is SHUT DOWN (verified 2026-09-20).
+    final preferred = await getModel();
+    final models = [preferred, ...availableModels.where((m) => m != preferred)];
     Object? lastErr;
     for (final model in models) {
       try {
@@ -421,7 +445,8 @@ ${context}''';
       ]
     });
 
-    const models = ['gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+    final preferred = await getModel();
+    final models = [preferred, ...availableModels.where((m) => m != preferred)];
     Object? lastErr;
     for (final model in models) {
       try {
