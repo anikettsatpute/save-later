@@ -79,7 +79,12 @@ class InboxPage extends ConsumerWidget {
         ],
       ),
       drawer: const _NavDrawer(),
-      body: Column(
+      body: Center(
+        // Web: cap content width so desktop doesn't stretch cards edge to
+        // edge (mobile-first layout looks broken on wide screens).
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 860),
+          child: Column(
         children: [
           _StatsHeader(counts: counts, filter: filter, ref: ref),
           _SearchBar(filter: filter, ref: ref),
@@ -111,6 +116,8 @@ class InboxPage extends ConsumerWidget {
             ),
           ),
         ],
+          ),
+        ),
       ),
       floatingActionButton: Row(
         mainAxisAlignment: MainAxisAlignment.end,

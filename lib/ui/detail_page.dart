@@ -84,6 +84,8 @@ class _DetailBody extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final collectionsAsync = ref.watch(itemCollectionsProvider(item.id));
+    // Web: constrain to a readable column (mobile UI stretched full-width
+    // looks broken on desktop — tiny hero, huge empty gutters).
     return Scaffold(
       appBar: AppBar(
         title: Text(item.category.label),
@@ -109,7 +111,10 @@ class _DetailBody extends ConsumerWidget {
           ),
         ],
       ),
-      body: ListView(
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 720),
+          child: ListView(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
         children: [
           if (item.thumbnailUrl != null)
@@ -117,8 +122,13 @@ class _DetailBody extends ConsumerWidget {
               tag: 'thumb-${item.id}',
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(12),
-                child: Image.network(item.thumbnailUrl!,
-                    errorBuilder: (_, __, ___) => const SizedBox.shrink()),
+                child: AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: Image.network(item.thumbnailUrl!,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) =>
+                          const SizedBox.shrink()),
+                ),
               ),
             ),
           const SizedBox(height: 12),
@@ -269,6 +279,8 @@ class _DetailBody extends ConsumerWidget {
             },
           ),
         ],
+          ),
+        ),
       ),
     );
   }
