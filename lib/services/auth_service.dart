@@ -50,7 +50,13 @@ class AuthService {
       return _auth.signInWithPopup(GoogleAuthProvider());
     }
     // google_sign_in v6: classic constructor API, cancellation returns null.
-    final googleUser = await GoogleSignIn().signIn();
+    // serverClientId = the type-3 "Web client" OAuth id from
+    // google-services.json. Without it, Firebase Auth rejects the idToken
+    // with ApiException: 10 on some devices/configs.
+    final googleUser = await GoogleSignIn(
+      serverClientId:
+          '833208594065-dai4s0u1cqlvrr0ekbcl8apehgrqau06.apps.googleusercontent.com',
+    ).signIn();
     if (googleUser == null) return null;
     final googleAuth = await googleUser.authentication;
     final credential = GoogleAuthProvider.credential(
