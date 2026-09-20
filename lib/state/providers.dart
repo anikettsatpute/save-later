@@ -1,7 +1,9 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
 import '../data/database.dart';
+import '../data/web_store.dart';
 import '../models/saved_item.dart';
 import '../services/ai_service.dart';
 import '../services/link_parser.dart';
@@ -9,11 +11,24 @@ import '../services/reminder_service.dart';
 import '../services/share_parser.dart';
 
 final _dbProvider = Provider((_) => AppDatabase());
+final _webProvider = Provider((_) => WebStore());
 final _aiProvider = Provider((_) => AiService());
 const _uuid = Uuid();
 
 /// Exposed for Settings retry path + detail direct-load.
-final dbProviderForRetry = _dbProvider;
+/// Web preview uses the in-memory store (sqlite wasm is blocked in the
+/// sandboxed browser); mobile uses sqflite. Same method names, dynamic
+/// dispatch keeps call sites unchanged.
+final dbProviderForRetry = Provider<dynamic>((ref) =>
+    kIsWeb ? ref.watch(_webProvider) : ref.watch(_dbProvider));
+
+/// Reads the right store inside providers (kIsWeb can't be a provider dep
+/// issue — both are cheap singletons).
+dynamic _store(Ref ref) =>
+    kIsWeb ? ref.watch(_webProvider) : ref.watch(_dbProvider);
+
+dynamic _storeRead(Ref ref) =>
+    kIsWeb ? ref.read(_webProvider) : ref.read(_dbProvider);
 
 /// Item id to navigate to (set by save sheet "View" action, consumed by inbox).
 final navigateToItemProvider = StateProvider<String?>((_) => null);
@@ -83,7 +98,7 @@ final viewModeProvider = StateProvider<ViewMode>((_) => ViewMode.list);
 
 final itemsProvider = FutureProvider<List<SavedItem>>((ref) async {
   final f = ref.watch(filterProvider);
-  final db = ref.watch(_dbProvider);
+  final db = _store(ref);
   await db.backfillFts();
   final list = await db.list(
     status: f.status,
@@ -117,7 +132,7 @@ class ItemCounts {
 
 final countsProvider = FutureProvider<ItemCounts>((ref) async {
   ref.watch(dataVersionProvider);
-  final db = ref.watch(_dbProvider);
+  final db = _store(ref);
   final inbox = await db.count(status: ItemStatus.inbox);
   final done = await db.count(status: ItemStatus.done);
   final unreadAi = await db.count(status: ItemStatus.inbox, aiProcessed: false);
@@ -130,12 +145,12 @@ final countsProvider = FutureProvider<ItemCounts>((ref) async {
 
 final collectionsProvider = FutureProvider<List<Collection>>((ref) async {
   ref.watch(dataVersionProvider);
-  return ref.watch(_dbProvider).collections();
+  return _store(ref).collections();
 });
 
 final rulesProvider = FutureProvider<List<TagRule>>((ref) async {
   ref.watch(dataVersionProvider);
-  return ref.watch(_dbProvider).tagRules();
+  return _store(ref).tagRules();
 });
 
 enum SavePhase { idle, fetching, ai, saving }
@@ -170,7 +185,7 @@ class SaveController extends StateNotifier<AsyncValue<void>> {
     final phase = _ref.read(savePhaseProvider.notifier);
     state = const AsyncValue.loading();
     try {
-      final db = _ref.read(_dbProvider);
+      final db = _storeRead(_ref);
       final existingId = await db.findIdByUrl(url);
       if (existingId != null) {
         state = const AsyncValue.data(null);
@@ -249,20 +264,20 @@ class SaveController extends StateNotifier<AsyncValue<void>> {
   }
 
   Future<void> setStatus(String id, ItemStatus status) async {
-    await _ref.read(_dbProvider).updateStatus(id, status);
+    await _storeRead(_ref).updateStatus(id, status);
     _ref.invalidate(itemsProvider);
     _bumpData(_ref);
   }
 
   Future<void> remove(String id) async {
     await ReminderService.cancel(ReminderService.notifId(id));
-    await _ref.read(_dbProvider).delete(id);
+    await _storeRead(_ref).delete(id);
     _ref.invalidate(itemsProvider);
     _bumpData(_ref);
   }
 
   Future<void> setReminder(String id, DateTime? when) async {
-    final db = _ref.read(_dbProvider);
+    final db = _storeRead(_ref);
     await db.updateFields(id, {'remindAt': when?.millisecondsSinceEpoch});
     if (when == null) {
       await ReminderService.cancel(ReminderService.notifId(id));
@@ -280,14 +295,14 @@ class SaveController extends StateNotifier<AsyncValue<void>> {
   }
 
   Future<void> saveNote(String id, String note) async {
-    await _ref.read(_dbProvider).updateFields(
+    await _storeRead(_ref).updateFields(
         id, {'userNote': note.trim().isEmpty ? null : note.trim()});
     _ref.invalidate(itemsProvider);
     _bumpData(_ref);
   }
 
   Future<void> setCollections(String id, List<String> collectionIds) async {
-    await _ref.read(_dbProvider).setItemCollections(id, collectionIds);
+    await _storeRead(_ref).setItemCollections(id, collectionIds);
     _ref.invalidate(itemsProvider);
     _bumpData(_ref);
   }

@@ -775,7 +775,7 @@ final highlightsProvider =
   return ref.watch(_highlightsDbProvider).highlights(itemId);
 });
 
-final _highlightsDbProvider = Provider((ref) => ref.watch(dbProviderForRetry));
+final _highlightsDbProvider = Provider<dynamic>((ref) => ref.watch(dbProviderForRetry));
 
 final itemCollectionsProvider =
     FutureProvider.family<List<String>, String>((ref, itemId) async {

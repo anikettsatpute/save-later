@@ -57,6 +57,18 @@ class LinkParser {
   static const _browserUa =
       'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36';
 
+  /// GET with graceful failure. On web the browser enforces CORS, so only
+  /// CORS-open endpoints (oEmbed, Arctic Shift, Gemini) succeed there — page
+  /// scrapes work on phone only. Never throws; null means "unavailable".
+  static Future<http.Response?> _get(String url,
+      {Map<String, String>? headers, Duration timeout = const Duration(seconds: 12)}) async {
+    try {
+      final res = await http.get(Uri.parse(url), headers: headers).timeout(timeout);
+      if (res.statusCode == 200) return res;
+    } catch (_) {}
+    return null;
+  }
+
   static ItemType detectType(String url, {String? ogType}) {
     final u = url.toLowerCase();
     if (_yt.hasMatch(u)) return ItemType.youtube;
@@ -101,8 +113,8 @@ class LinkParser {
   static Future<LinkMeta?> _youtubeOembed(String url) async {
     final endpoint = 'https://www.youtube.com/oembed?url=${Uri.encodeComponent(url)}&format=json';
     try {
-      final res = await http.get(Uri.parse(endpoint)).timeout(const Duration(seconds: 10));
-      if (res.statusCode == 200) {
+      final res = await _get(endpoint, timeout: const Duration(seconds: 10));
+      if (res != null && res.statusCode == 200) {
         final j = jsonDecode(res.body) as Map<String, dynamic>;
         final videoId = _extractYoutubeId(url);
         final author = j['author_name'] as String?;
@@ -111,11 +123,9 @@ class LinkParser {
           type: ItemType.youtube,
           author: author,
           thumbnailUrl: videoId != null ? 'https://i.ytimg.com/vi/$videoId/hqdefault.jpg' : null,
-          // oEmbed has no description — synthesize one so the summary
-          // field never ends up as bare "Saved link".
-          description: author?.isNotEmpty == true
-              ? 'YouTube video by $author. Open to watch.'
-              : 'YouTube video. Open to watch.',
+          // oEmbed has no description — leave it null so AI writes a real
+          // topic summary from the title instead of "Open to watch" filler.
+          description: null,
           siteName: 'YouTube',
           isVideo: true,
         );
@@ -128,23 +138,30 @@ class LinkParser {
       title: _fallbackTitle(url),
       type: ItemType.youtube,
       thumbnailUrl: videoId != null ? 'https://i.ytimg.com/vi/$videoId/hqdefault.jpg' : null,
-      description: 'YouTube video. Open to watch.',
+      description: null,
       siteName: 'YouTube',
       isVideo: true,
     );
   }
 
   // ----------------------------------------------------------------- reddit
-  /// oEmbed first (works without auth, gives title/author/thumbnail), then
-  /// .json for subreddit/score/comments/selftext. Either can fail alone.
+  /// Arctic Shift archive first (public, no auth — verified 2026-09-20):
+  /// real title/author/subreddit/score/comments/selftext. Legacy oEmbed +
+  /// .json kept as fallback (both currently walled: oEmbed CORS-blocked in
+  /// browser + 404 for some posts, .json 403/login-wall). Either can fail alone.
   static Future<LinkMeta?> _redditRich(String url) async {
     final canonical = _canonicalReddit(url);
+    // 1. Arctic Shift: title + author + subreddit + score + selftext.
+    try {
+      final arctic = await _arcticPost(canonical);
+      if (arctic != null) return arctic;
+    } catch (_) {}
     LinkMeta? base;
     try {
-      final oembed = await http
-          .get(Uri.parse('https://www.reddit.com/oembed?url=${Uri.encodeComponent(canonical)}'))
-          .timeout(const Duration(seconds: 10));
-      if (oembed.statusCode == 200) {
+      final oembed = await _get(
+          'https://www.reddit.com/oembed?url=${Uri.encodeComponent(canonical)}',
+          timeout: const Duration(seconds: 10));
+      if (oembed != null && oembed.statusCode == 200) {
         final j = jsonDecode(oembed.body) as Map<String, dynamic>;
         base = LinkMeta(
           title: (j['title'] as String?) ?? _fallbackTitle(url),
@@ -185,6 +202,76 @@ class LinkParser {
     return base;
   }
 
+  /// Arctic Shift post lookup: subreddit newest-100 scan, client-side id
+  /// match. Returns full LinkMeta (title/author/subreddit/score/comments).
+  /// Title slug in the URL is a last resort (underscores -> spaces).
+  static Future<LinkMeta?> _arcticPost(String canonical) async {
+    final idM = RegExp(r'/comments/([a-z0-9]+)', caseSensitive: false).firstMatch(canonical);
+    final subM = RegExp(r'/r/([A-Za-z0-9_]+)').firstMatch(canonical);
+    final postId = idM?.group(1);
+    final sub = subM?.group(1);
+    Map<String, dynamic>? post;
+    if (postId != null && sub != null) {
+      try {
+        final res = await _get(
+            'https://arctic-shift.photon-reddit.com/api/posts/search?subreddit=$sub&limit=100&sort=desc',
+            timeout: const Duration(seconds: 15));
+        if (res != null && res.statusCode == 200) {
+          final decoded = jsonDecode(res.body);
+          final data = decoded is Map ? decoded['data'] as List? : null;
+          if (data != null) {
+            for (final p in data) {
+              if (p is Map<String, dynamic> && p['id'] == postId) {
+                post = p;
+                break;
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    if (post == null) {
+      // Slug fallback: /comments/<id>/<title_with_underscores>/ carries the
+      // real title — better than "reddit.com".
+      final slug = _redditSlugTitle(canonical);
+      if (slug == null) return null;
+      return LinkMeta(
+        title: slug,
+        type: ItemType.reddit,
+        siteName: 'Reddit',
+        subreddit: sub,
+      );
+    }
+    final selftext = ((post['selftext'] as String?) ?? '').trim();
+    final title = ((post['title'] as String?) ?? '').trim();
+    return LinkMeta(
+      title: title.isNotEmpty ? title : (_redditSlugTitle(canonical) ?? _fallbackTitle(canonical)),
+      type: ItemType.reddit,
+      author: post['author'] as String?,
+      thumbnailUrl: _validThumb(post['thumbnail'] as String?) ?? _previewImage(post),
+      description: selftext.isNotEmpty && selftext != '[removed]' && selftext != '[deleted]' ? selftext : null,
+      siteName: 'Reddit',
+      subreddit: (post['subreddit'] as String?) ?? sub,
+      redditScore: (post['score'] as num?)?.toInt(),
+      redditComments: (post['num_comments'] as num?)?.toInt(),
+      articleText: selftext.isNotEmpty && selftext != '[removed]' && selftext != '[deleted]' ? _clip(selftext, 2000) : null,
+    );
+  }
+
+  /// "ashneer_day_by_day" -> "Ashneer Day By Day" from the URL slug.
+  static String? _redditSlugTitle(String canonical) {
+    try {
+      final m = RegExp(r'/comments/[a-z0-9]+/([^/?#]+)', caseSensitive: false).firstMatch(canonical);
+      final slug = m?.group(1);
+      if (slug == null || slug.isEmpty) return null;
+      final words = slug.split('_').where((w) => w.isNotEmpty).toList();
+      if (words.isEmpty) return null;
+      return words.map((w) => w[0].toUpperCase() + (w.length > 1 ? w.substring(1) : '')).join(' ');
+    } catch (_) {
+      return null;
+    }
+  }
+
   static Future<Map<String, dynamic>?> _redditPostJson(String canonical) async {
     // Try old.reddit (less bot-walled) then www with JSON-friendly UA.
     const uas = [
@@ -200,10 +287,10 @@ class LinkParser {
     for (final c in candidates) {
       for (final ua in uas) {
         try {
-          final res = await http
-              .get(Uri.parse('$c.json'), headers: {'User-Agent': ua, 'Accept': 'application/json'})
-              .timeout(const Duration(seconds: 10));
-          if (res.statusCode != 200) continue;
+          final res = await _get('$c.json',
+              headers: {'User-Agent': ua, 'Accept': 'application/json'},
+              timeout: const Duration(seconds: 10));
+          if (res == null || res.statusCode != 200) continue;
           final decoded = jsonDecode(res.body);
           if (decoded is List && decoded.isNotEmpty) {
             final children = (decoded[0]['data']['children'] as List?);
@@ -243,11 +330,11 @@ class LinkParser {
 
     // 1. Public oEmbed (works for some posts without auth).
     try {
-      final res = await http
-          .get(Uri.parse('https://www.instagram.com/oembed?url=${Uri.encodeComponent(url)}'),
-              headers: {'User-Agent': _browserUa})
-          .timeout(const Duration(seconds: 10));
-      if (res.statusCode == 200) {
+      final res = await _get(
+          'https://www.instagram.com/oembed?url=${Uri.encodeComponent(url)}',
+          headers: {'User-Agent': _browserUa},
+          timeout: const Duration(seconds: 10));
+      if (res != null && res.statusCode == 200) {
         final j = jsonDecode(res.body) as Map<String, dynamic>;
         return LinkMeta(
           title: (j['title'] as String?) ??
@@ -327,10 +414,10 @@ class LinkParser {
   // ------------------------------------------------------------- rich page
   /// Full OG + Twitter cards + JSON-LD + article: tags + body excerpt.
   static Future<LinkMeta> _richPage(String url) async {
-    final res = await http
-        .get(Uri.parse(url), headers: {'User-Agent': _browserUa, 'Accept-Language': 'en-US,en;q=0.9'})
-        .timeout(const Duration(seconds: 12));
-    if (res.statusCode != 200) {
+    final res = await _get(url,
+        headers: {'User-Agent': _browserUa, 'Accept-Language': 'en-US,en;q=0.9'},
+        timeout: const Duration(seconds: 12));
+    if (res == null || res.statusCode != 200) {
       return LinkMeta(title: _fallbackTitle(url), type: detectType(url));
     }
     final doc = html_parser.parse(res.body);

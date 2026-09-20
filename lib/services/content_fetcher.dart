@@ -13,6 +13,17 @@ class ContentFetcher {
   static const _ua =
       'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36';
 
+  /// Same contract as LinkParser._get (direct-only; browser CORS blocks
+  /// page scrapes on web, phone is unaffected). Kept local to avoid import.
+  static Future<http.Response?> _get(String url,
+      {Map<String, String>? headers, Duration timeout = const Duration(seconds: 12)}) async {
+    try {
+      final res = await http.get(Uri.parse(url), headers: headers).timeout(timeout);
+      if (res.statusCode == 200) return res;
+    } catch (_) {}
+    return null;
+  }
+
   /// Returns up to ~4k chars of content context, or null when unavailable.
   static Future<String?> fetchFor(String url, String typeName) async {
     try {
@@ -32,11 +43,10 @@ class ContentFetcher {
     final videoId = _ytId(url);
     // 1. oEmbed title/author (fast, reliable).
     try {
-      final res = await http
-          .get(Uri.parse(
-              'https://www.youtube.com/oembed?url=${Uri.encodeComponent(url)}&format=json'))
-          .timeout(const Duration(seconds: 8));
-      if (res.statusCode == 200) {
+      final res = await _get(
+          'https://www.youtube.com/oembed?url=${Uri.encodeComponent(url)}&format=json',
+          timeout: const Duration(seconds: 8));
+      if (res != null && res.statusCode == 200) {
         final j = jsonDecode(res.body) as Map<String, dynamic>;
         if ((j['title'] as String?)?.isNotEmpty == true) {
           out.add('Video title: ${j['title']}');
@@ -49,11 +59,10 @@ class ContentFetcher {
     // 2. noembed fallback (different infra, sometimes works when oEmbed 403s).
     if (out.isEmpty) {
       try {
-        final res = await http
-            .get(Uri.parse(
-                'https://noembed.com/embed?url=${Uri.encodeComponent(url)}'))
-            .timeout(const Duration(seconds: 8));
-        if (res.statusCode == 200) {
+        final res = await _get(
+            'https://noembed.com/embed?url=${Uri.encodeComponent(url)}',
+            timeout: const Duration(seconds: 8));
+        if (res != null && res.statusCode == 200) {
           final j = jsonDecode(res.body) as Map<String, dynamic>;
           if ((j['title'] as String?)?.isNotEmpty == true) {
             out.add('Video title: ${j['title']}');
@@ -67,13 +76,12 @@ class ContentFetcher {
     // 3. Watch-page scrape: description, keywords, caption-track names.
     if (videoId != null) {
       try {
-        final res = await http
-            .get(
-              Uri.parse('https://www.youtube.com/watch?v=$videoId&hl=en'),
-              headers: {'User-Agent': _ua, 'Accept-Language': 'en-US,en;q=0.9'},
-            )
-            .timeout(const Duration(seconds: 10));
-        if (res.statusCode == 200) {
+        final res = await _get(
+          'https://www.youtube.com/watch?v=$videoId&hl=en',
+          headers: {'User-Agent': _ua, 'Accept-Language': 'en-US,en;q=0.9'},
+          timeout: const Duration(seconds: 10),
+        );
+        if (res != null && res.statusCode == 200) {
           final html = res.body;
           final desc = _ytMeta(html, 'description');
           if (desc != null && desc.length > 40) {
@@ -133,7 +141,20 @@ class ContentFetcher {
   }
 
   // ---------------------------------------------------------------- reddit
+  /// Reddit blocks all unauthenticated .json access (403 www, login-wall
+  /// old — verified 2026-09-20). Source of truth is the Arctic Shift public
+  /// archive (arctic-shift.photon-reddit.com): post selftext + top comments
+  /// by link_id. Falls back to legacy .json attempts in case Reddit opens up.
   static Future<String?> _reddit(String url) async {
+    // 1. Arctic Shift: resolve post id from the URL, fetch post + comments.
+    try {
+      final postId = _redditPostId(url);
+      if (postId != null) {
+        final arctic = await _arcticShift(postId, url);
+        if (arctic?.isNotEmpty == true) return arctic;
+      }
+    } catch (_) {}
+    // 2. Legacy direct .json (currently walled, kept as fallback).
     var jsonUrl = url.split('?').first;
     if (jsonUrl.endsWith('/')) {
       jsonUrl = jsonUrl.substring(0, jsonUrl.length - 1);
@@ -146,11 +167,10 @@ class ContentFetcher {
     for (final c in candidates) {
       for (final ua in uas) {
         try {
-          final res = await http
-              .get(Uri.parse('$c.json'),
-                  headers: {'User-Agent': ua, 'Accept': 'application/json'})
-              .timeout(const Duration(seconds: 10));
-          if (res.statusCode != 200) continue;
+          final res = await _get('$c.json',
+              headers: {'User-Agent': ua, 'Accept': 'application/json'},
+              timeout: const Duration(seconds: 10));
+          if (res == null || res.statusCode != 200) continue;
           final decoded = jsonDecode(res.body);
           if (decoded is! List || decoded.isEmpty) continue;
           final out = <String>[];
@@ -201,17 +221,110 @@ class ContentFetcher {
     return null;
   }
 
+  /// Extracts the base-36 post id from /comments/<id>/ URLs.
+  static String? _redditPostId(String url) {
+    try {
+      final m = RegExp(r'/comments/([a-z0-9]+)', caseSensitive: false)
+          .firstMatch(url);
+      return m?.group(1);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Extracts subreddit name from /r/<name>/ URLs.
+  static String? _redditSubreddit(String url) {
+    try {
+      final m =
+          RegExp(r'/r/([A-Za-z0-9_]+)', caseSensitive: false).firstMatch(url);
+      return m?.group(1);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Arctic Shift public archive: full post record (selftext, flair, score)
+  /// + top comments for the post. No auth needed. Post lookup has no
+  /// id-param, so we scan the subreddit's newest 100 and match client-side
+  /// (single 500KB call, ~2s). Falls back to legacy .json below.
+  static Future<String?> _arcticShift(String postId, String url) async {
+    final out = <String>[];
+    // Post record: subreddit scan + id match.
+    final sub = _redditSubreddit(url);
+    if (sub == null) return null;
+    Map<String, dynamic>? post;
+    try {
+      final res = await _get(
+          'https://arctic-shift.photon-reddit.com/api/posts/search?subreddit=$sub&limit=100&sort=desc',
+          timeout: const Duration(seconds: 15));
+      if (res == null || res.statusCode != 200) return null;
+      final decoded = jsonDecode(res.body);
+      final data = decoded is Map ? decoded['data'] as List? : null;
+      if (data == null) return null;
+      for (final p in data) {
+        if (p is Map<String, dynamic> && p['id'] == postId) {
+          post = p;
+          break;
+        }
+      }
+      if (post == null) return null;
+      final selftext = (post['selftext'] as String?)?.trim() ?? '';
+      if (selftext.isNotEmpty &&
+          selftext != '[removed]' &&
+          selftext != '[deleted]') {
+        out.add('Post text: ${_clip(selftext, 2000)}');
+      }
+      final flair = (post['link_flair_text'] as String?)?.trim();
+      if (flair?.isNotEmpty == true) out.add('Flair: $flair');
+      final ratio = post['upvote_ratio'];
+      if (ratio != null) out.add('Upvote ratio: $ratio');
+    } catch (_) {
+      return null;
+    }
+    // Top comments: search subreddit-agnostic by link_id, sort by score.
+    try {
+      final res = await _get(
+          'https://arctic-shift.photon-reddit.com/api/comments/search?link_id=t3_$postId&limit=25&sort=desc',
+          timeout: const Duration(seconds: 12));
+      if (res != null && res.statusCode == 200) {
+        final decoded = jsonDecode(res.body);
+        final data = decoded is Map ? decoded['data'] as List? : null;
+        if (data != null) {
+          final scored = <Map<String, dynamic>>[];
+          for (final c in data) {
+            if (c is! Map<String, dynamic>) continue;
+            final body = (c['body'] as String?)?.trim() ?? '';
+            if (body.isEmpty ||
+                body == '[removed]' ||
+                body == '[deleted]' ||
+                body.length < 30) {
+              continue;
+            }
+            scored.add(c);
+          }
+          scored.sort((a, b) =>
+              ((b['score'] as num?) ?? 0).compareTo((a['score'] as num?) ?? 0));
+          for (final c in scored.take(5)) {
+            final score = (c['score'] as num?)?.toInt() ?? 0;
+            out.add('Top comment (▲$score): ${_clip(c['body'] as String, 400)}');
+          }
+        }
+      }
+    } catch (_) {}
+    if (out.isEmpty) return null;
+    return _clip(out.join('\n\n'), 4000);
+  }
+
   // ------------------------------------------------------------- instagram
   static Future<String?> _instagram(String url) async {
     // 1. Embed page often exposes og:description caption without login.
     try {
       var embed = url.split('?').first;
       if (!embed.endsWith('/')) embed = '$embed/';
-      final res = await http
-          .get(Uri.parse('${embed}embed/captioned/'),
-              headers: {'User-Agent': _ua, 'Accept-Language': 'en-US,en;q=0.9'})
-          .timeout(const Duration(seconds: 10));
-      if (res.statusCode == 200) {
+      final res = await _get('${embed}embed/captioned/',
+          headers: {'User-Agent': _ua, 'Accept-Language': 'en-US,en;q=0.9'},
+          timeout: const Duration(seconds: 10));
+      if (res != null && res.statusCode == 200) {
         final html = res.body;
         final desc = RegExp(
           '<meta\\s+property=["\']og:description["\']\\s+content=["\'](.*?)["\']',

@@ -1,7 +1,9 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/saved_item.dart';
 import 'content_fetcher.dart';
@@ -33,14 +35,40 @@ class AiService {
     'gemini-2.5-flash-lite',
   ];
 
-  Future<void> saveApiKey(String key) => _storage.write(key: _keyName, value: key.trim());
-  Future<String?> getApiKey() => _storage.read(key: _keyName);
-  Future<void> clearApiKey() => _storage.delete(key: _keyName);
+  Future<void> saveApiKey(String key) => _write(_keyName, key.trim());
+  Future<String?> getApiKey() => _read(_keyName);
+  Future<void> clearApiKey() => _delete(_keyName);
 
-  Future<void> saveModel(String model) => _storage.write(key: _modelName, value: model);
+  Future<void> saveModel(String model) => _write(_modelName, model);
   Future<String> getModel() async {
-    final m = await _storage.read(key: _modelName);
+    final m = await _read(_modelName);
     return availableModels.contains(m) ? m! : availableModels.first;
+  }
+
+  // flutter_secure_storage has no web implementation in this build (it
+  // pulls platform channels the sandbox blocks). Web preview keeps the key
+  // in shared_preferences (localStorage); mobile keeps secure storage.
+  Future<void> _write(String k, String v) async {
+    if (kIsWeb) {
+      (await SharedPreferences.getInstance()).setString(k, v);
+    } else {
+      await _storage.write(key: k, value: v);
+    }
+  }
+
+  Future<String?> _read(String k) async {
+    if (kIsWeb) {
+      return (await SharedPreferences.getInstance()).getString(k);
+    }
+    return _storage.read(key: k);
+  }
+
+  Future<void> _delete(String k) async {
+    if (kIsWeb) {
+      (await SharedPreferences.getInstance()).remove(k);
+    } else {
+      await _storage.delete(key: k);
+    }
   }
 
   /// Returns (enrichment, usedAi). `usedAi` false means rules fallback.
@@ -111,16 +139,18 @@ class AiService {
 
   /// Human fallback when the parser found no excerpt/description at all
   /// (YouTube oEmbed fail, Google Feed redirect, JS-heavy pages).
+  /// Topic-first: never "Open to watch" filler — the AI prompt now forbids
+  /// that, and this offline path matches.
   String _describeFromMeta(String url, LinkMeta meta) {
     final host = Uri.tryParse(url)?.host.replaceFirst('www.', '') ?? '';
     final who = meta.author?.isNotEmpty == true ? ' by ${meta.author}' : '';
     return switch (meta.type) {
-      ItemType.youtube => 'YouTube video$who — “${meta.title}”. Open to watch.',
-      ItemType.reddit => 'Reddit post$who${meta.subreddit != null ? ' in r/${meta.subreddit}' : ''} — “${meta.title}”.',
-      ItemType.instagram => 'Instagram post$who. Open in Instagram to view.',
-      ItemType.tiktok => 'TikTok video$who. Open to watch.',
-      ItemType.movie => 'Movie/show page — “${meta.title}” ($host).',
-      _ => host.isNotEmpty ? 'Article from $host — “${meta.title}”.' : 'Saved link — “${meta.title}”.',
+      ItemType.youtube => '“${meta.title}”$who.',
+      ItemType.reddit => '“${meta.title}”${meta.subreddit != null ? ' (r/${meta.subreddit})' : ''}.',
+      ItemType.instagram => 'Instagram post$who: “${meta.title}”.',
+      ItemType.tiktok => 'TikTok$who: “${meta.title}”.',
+      ItemType.movie => '“${meta.title}” ($host).',
+      _ => host.isNotEmpty ? '“${meta.title}” ($host).' : '“${meta.title}”.',
     };
   }
 
@@ -163,9 +193,13 @@ class AiService {
     } catch (_) {}
     final prompt = '''
 You categorize saved links for a read-it-later app. Reply with ONLY valid JSON, no markdown fences:
-{"category": "<one of: $categories>", "summary": "<1-2 line plain-language summary of what this is and why it matters>", "tags": ["<up to 3 lowercase tags>"]}
+{"category": "<one of: $categories>", "summary": "<1-2 line plain-language summary of what this is ABOUT (its topic/content — never describe the act of saving or opening the link)>", "tags": ["<up to 3 lowercase topic tags>"]}
 
 Rules: YouTube/music videos -> Watch. Podcasts/audio -> Listen. Movies/series/IMDb -> Movies & Shows. Tutorials/docs/courses -> Learn. Products/deals -> Shopping. Reddit threads/discussions/opinion -> Ideas or Read based on content. News/articles/blogs -> Read. Default Other only if nothing fits.
+
+Summary rules: describe WHAT the content is about using Title + Page content. NEVER write "Open to watch", "Saved link", "YouTube video by X" or any meta-commentary about saving/opening — the user already knows they saved it. If content is thin, infer the topic from the title (e.g. a video titled "X" is about X).
+
+Tags: content topics (technologies, people, subjects named in Page content) — never "youtube", "video", "reddit", "post", "watch", "saved".
 
 Base tags on the Page content when present (topics, people, tech named there) — not just the title.
 

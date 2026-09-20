@@ -46,11 +46,11 @@ class Collection {
       };
 
   factory Collection.fromMap(Map<String, dynamic> m) => Collection(
-        id: m['id'] as String,
-        name: m['name'] as String,
-        icon: m['icon'] as String?,
-        sortOrder: (m['sortOrder'] as int?) ?? 0,
-        createdAt: DateTime.fromMillisecondsSinceEpoch(m['createdAt'] as int),
+        id: '${m['id']}',
+        name: '${m['name']}',
+        icon: m['icon'] == null ? null : '${m['icon']}',
+        sortOrder: (num.tryParse('${m['sortOrder'] ?? 0}') ?? 0).toInt(),
+        createdAt: DateTime.fromMillisecondsSinceEpoch((num.tryParse('${m['createdAt']}') ?? 0).toInt()),
       );
 }
 
@@ -81,18 +81,18 @@ class TagRule {
       };
 
   factory TagRule.fromMap(Map<String, dynamic> m) => TagRule(
-        id: m['id'] as String,
+        id: '${m['id']}',
         // Column was renamed match -> pattern in DB v4 (match is reserved).
         // Accept both keys so rows written by the short-lived v3 build load.
-        match: (m['pattern'] ?? m['match']) as String,
-        category: (m['category'] as String?) != null
-            ? Category.values.byName(m['category'] as String)
-            : null,
-        tags: ((m['tags'] as String?) ?? '')
+        match: '${m['pattern'] ?? m['match']}',
+        category: m['category'] == null
+            ? null
+            : Category.values.byName('${m['category']}'),
+        tags: ('${m['tags'] ?? ''}')
             .split(',')
             .where((t) => t.isNotEmpty)
             .toList(),
-        enabled: (m['enabled'] as int? ?? 1) == 1,
+        enabled: (num.tryParse('${m['enabled'] ?? 1}') ?? 1) == 1,
       );
 }
 
@@ -121,11 +121,11 @@ class Highlight {
       };
 
   factory Highlight.fromMap(Map<String, dynamic> m) => Highlight(
-        id: m['id'] as String,
-        itemId: m['itemId'] as String,
-        text: m['text'] as String,
-        note: m['note'] as String?,
-        createdAt: DateTime.fromMillisecondsSinceEpoch(m['createdAt'] as int),
+        id: '${m['id']}',
+        itemId: '${m['itemId']}',
+        text: '${m['text']}',
+        note: m['note'] == null ? null : '${m['note']}',
+        createdAt: DateTime.fromMillisecondsSinceEpoch((num.tryParse('${m['createdAt']}') ?? 0).toInt()),
       );
 }
 
@@ -258,32 +258,32 @@ class SavedItem {
       };
 
   factory SavedItem.fromMap(Map<String, dynamic> m) => SavedItem(
-        id: m['id'] as String,
-        url: m['url'] as String,
-        title: m['title'] as String,
-        type: ItemType.values.byName(m['type'] as String),
-        thumbnailUrl: m['thumbnailUrl'] as String?,
-        author: m['author'] as String?,
-        summary: m['summary'] as String?,
-        category: Category.values.byName(m['category'] as String),
-        tags: ((m['tags'] as String?) ?? '').split(',').where((t) => t.isNotEmpty).toList(),
-        status: ItemStatus.values.byName(m['status'] as String),
-        createdAt: DateTime.fromMillisecondsSinceEpoch(m['createdAt'] as int),
-        consumedAt: (m['consumedAt'] as int?) != null
-            ? DateTime.fromMillisecondsSinceEpoch(m['consumedAt'] as int)
-            : null,
-        aiProcessed: (m['aiProcessed'] as int? ?? 0) == 1,
-        siteName: m['siteName'] as String?,
-        excerpt: m['excerpt'] as String?,
-        readingMinutes: m['readingMinutes'] as int?,
-        subreddit: m['subreddit'] as String?,
-        redditScore: m['redditScore'] as int?,
-        redditComments: m['redditComments'] as int?,
-        isVideo: (m['isVideo'] as int?) == null ? null : (m['isVideo'] as int) == 1,
-        bodyText: m['bodyText'] as String?,
-        userNote: m['userNote'] as String?,
-        remindAt: (m['remindAt'] as int?) != null
-            ? DateTime.fromMillisecondsSinceEpoch(m['remindAt'] as int)
-            : null,
+        id: '${m['id']}',
+        url: '${m['url']}',
+        title: '${m['title']}',
+        type: ItemType.values.byName('${m['type']}'),
+        thumbnailUrl: m['thumbnailUrl'] == null ? null : '${m['thumbnailUrl']}',
+        author: m['author'] == null ? null : '${m['author']}',
+        summary: m['summary'] == null ? null : '${m['summary']}',
+        category: Category.values.byName('${m['category']}'),
+        tags: ('${m['tags'] ?? ''}').split(',').where((t) => t.isNotEmpty).toList(),
+        status: ItemStatus.values.byName('${m['status']}'),
+        createdAt: DateTime.fromMillisecondsSinceEpoch((num.tryParse('${m['createdAt']}') ?? 0).toInt()),
+        consumedAt: m['consumedAt'] == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch((num.tryParse('${m['consumedAt']}') ?? 0).toInt()),
+        aiProcessed: (num.tryParse('${m['aiProcessed'] ?? 0}') ?? 0) == 1,
+        siteName: m['siteName'] == null ? null : '${m['siteName']}',
+        excerpt: m['excerpt'] == null ? null : '${m['excerpt']}',
+        readingMinutes: m['readingMinutes'] == null ? null : (num.tryParse('${m['readingMinutes']}') ?? 0).toInt(),
+        subreddit: m['subreddit'] == null ? null : '${m['subreddit']}',
+        redditScore: m['redditScore'] == null ? null : (num.tryParse('${m['redditScore']}') ?? 0).toInt(),
+        redditComments: m['redditComments'] == null ? null : (num.tryParse('${m['redditComments']}') ?? 0).toInt(),
+        isVideo: m['isVideo'] == null ? null : (num.tryParse('${m['isVideo']}') ?? 0) == 1,
+        bodyText: m['bodyText'] == null ? null : '${m['bodyText']}',
+        userNote: m['userNote'] == null ? null : '${m['userNote']}',
+        remindAt: m['remindAt'] == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch((num.tryParse('${m['remindAt']}') ?? 0).toInt()),
       );
 }

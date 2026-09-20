@@ -1,7 +1,6 @@
 import 'package:flutter/foundation.dart' hide Category;
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
-import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
 
 import '../models/saved_item.dart';
 
@@ -12,57 +11,61 @@ class AppDatabase {
   static const _version = 4;
   Database? _db;
   bool _ftsAvailable = true;
-  static bool _ffiInit = false;
 
   Future<Database> get db async {
     final existing = _db;
     if (existing != null) return existing;
-    // Web (browser test found this): sqflite plugin has no web
-    // implementation — route through the wasm/ffi-web factory.
-    if (kIsWeb && !_ffiInit) {
-      databaseFactory = createDatabaseFactoryFfiWeb();
-      _ffiInit = true;
-    }
+    // NOTE: mobile-only. Web preview uses WebStore (in-memory) — the sqlite
+    // wasm build can't init in the sandboxed browser (COOP/COEP + wasm env
+    // import errors), and merely importing the ffi_web package poisons the
+    // web build. This file must stay free of web/sqlite-ffi imports.
     final dir = await getDatabasesPath();
     final opened = await openDatabase(
       p.join(dir, _name),
       version: _version,
       onCreate: (d, v) async => _createAll(d),
-      onUpgrade: (d, oldV, newV) async {
-        if (oldV < 2) {
-          for (final col in [
-            'siteName TEXT',
-            'excerpt TEXT',
-            'readingMinutes INTEGER',
-            'subreddit TEXT',
-            'redditScore INTEGER',
-            'redditComments INTEGER',
-            'isVideo INTEGER',
-          ]) {
-            await _addColumn(d, col);
-          }
-        }
-        if (oldV < 3) {
-          for (final col in ['bodyText TEXT', 'userNote TEXT', 'remindAt INTEGER']) {
-            await _addColumn(d, col);
-          }
-          await _createV3Tables(d);
-        }
-        if (oldV < 4) {
-          // match is a reserved word in SQLite FTS context and risky as a
-          // column name — rename to pattern, preserving existing rows.
-          final cols = await d.rawQuery('PRAGMA table_info(tag_rules)');
-          final names = cols.map((c) => c['name'] as String).toSet();
-          if (names.contains('match') && !names.contains('pattern')) {
-            await d.execute('ALTER TABLE tag_rules RENAME COLUMN "match" TO pattern');
-          } else if (!names.contains('pattern')) {
-            await d.execute('ALTER TABLE tag_rules ADD COLUMN pattern TEXT NOT NULL DEFAULT \'\'');
-          }
-        }
-      },
+      onUpgrade: (d, oldV, newV) async => _upgrade(d, oldV),
     );
     _db = opened;
     return opened;
+  }
+
+  /// Shared v2/v3/v4 migration steps (used by both mobile + web open paths).
+  static Future<void> _upgrade(DatabaseExecutor d, int oldV) async {
+    if (oldV < 2) {
+      for (final col in [
+        'siteName TEXT',
+        'excerpt TEXT',
+        'readingMinutes INTEGER',
+        'subreddit TEXT',
+        'redditScore INTEGER',
+        'redditComments INTEGER',
+        'isVideo INTEGER',
+      ]) {
+        await _addColumn(d, col);
+      }
+    }
+    if (oldV < 3) {
+      for (final col in ['bodyText TEXT', 'userNote TEXT', 'remindAt INTEGER']) {
+        await _addColumn(d, col);
+      }
+      await _createV3Tables(d);
+    }
+    if (oldV < 4) {
+      await _upgradeV4(d);
+    }
+  }
+
+  /// match is a reserved word in SQLite FTS context and risky as a
+  /// column name — rename to pattern, preserving existing rows.
+  static Future<void> _upgradeV4(DatabaseExecutor d) async {
+    final cols = await d.rawQuery('PRAGMA table_info(tag_rules)');
+    final names = cols.map((c) => c['name'] as String).toSet();
+    if (names.contains('match') && !names.contains('pattern')) {
+      await d.execute('ALTER TABLE tag_rules RENAME COLUMN "match" TO pattern');
+    } else if (!names.contains('pattern')) {
+      await d.execute('ALTER TABLE tag_rules ADD COLUMN pattern TEXT NOT NULL DEFAULT \'\'');
+    }
   }
 
   static Future<void> _addColumn(DatabaseExecutor d, String col) async {
@@ -187,7 +190,8 @@ class AppDatabase {
     try {
       final d = await db;
       final n = await d.rawQuery('SELECT COUNT(*) AS n FROM items_fts');
-      if (((n.first['n'] as int?) ?? 0) > 0) return;
+      final count = n.isEmpty ? 0 : (num.tryParse('${n.first['n']}') ?? 0);
+      if (count > 0) return;
       await d.execute('''
         INSERT INTO items_fts(id, title, summary, bodyText, tags, userNote)
         SELECT id, title, summary, bodyText, tags, userNote FROM items
@@ -347,7 +351,8 @@ class AppDatabase {
       'SELECT COUNT(*) AS n FROM items${where.isEmpty ? '' : ' WHERE ${where.join(' AND ')}'}',
       args.isEmpty ? null : args,
     );
-    return (rows.first['n'] as int?) ?? 0;
+    if (rows.isEmpty) return 0;
+    return (num.tryParse('${rows.first['n']}') ?? 0).toInt();
   }
 
   // ------------------------------------------------------------ collections
@@ -388,7 +393,8 @@ class AppDatabase {
     final d = await db;
     final rows = await d.rawQuery(
         'SELECT COUNT(*) AS n FROM item_collections WHERE collectionId = ?', [collectionId]);
-    return (rows.first['n'] as int?) ?? 0;
+    if (rows.isEmpty) return 0;
+    return (num.tryParse('${rows.first['n']}') ?? 0).toInt();
   }
 
   // ----------------------------------------------------------------- rules
