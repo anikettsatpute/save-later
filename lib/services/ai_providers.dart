@@ -101,13 +101,29 @@ class ProviderClients {
       throw Exception(
           'Gemini blocked the request (${body['promptFeedback'] ?? 'no reason'})');
     }
-    final parts =
-        (candidates.first['content']?['parts'] as List?);
+    // gemini-3 puts the answer in parts WITHOUT thoughtSignature; thought
+    // parts carry the signature. Old code read parts.first, which is the
+    // thought — take the first part with real text and no signature.
+    final parts = (candidates.first['content']?['parts'] as List?);
     if (parts == null || parts.isEmpty) {
       throw Exception(
           'Gemini returned no text (finish: ${candidates.first['finishReason'] ?? 'unknown'})');
     }
-    final text = (parts.first['text'] as String? ?? '').trim();
+    String text = '';
+    for (final p in parts) {
+      final m = p as Map<String, dynamic>?;
+      final t = (m?['text'] as String? ?? '').trim();
+      if (t.isEmpty) continue;
+      if (m?.containsKey('thoughtSignature') == true && text.isEmpty) {
+        // Thought part that happens to contain text — keep as fallback
+        // only; prefer a clean non-thought part below.
+        text = t;
+        continue;
+      }
+      text = t;
+      break;
+    }
+    text = text.trim();
     if (text.isEmpty) throw Exception('Gemini returned empty response');
     return text;
   }
