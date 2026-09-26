@@ -130,10 +130,10 @@ class ContentFetcher {
       }
       final v = uri.queryParameters['v'];
       if (v != null && v.isNotEmpty) return v;
-      // /shorts/<id>, /embed/<id>, /live/<id>
+      // /shorts/<id>, /embed/<id>, /live/<id> carry no ?v= param.
       final segs = uri.pathSegments;
       for (var i = 0; i < segs.length - 1; i++) {
-        if (['shorts', 'embed', 'live', 'v'].contains(segs[i])) {
+        if (['shorts', 'embed', 'live', 'v'].contains(segs[i].toLowerCase())) {
           return segs[i + 1].split('?').first;
         }
       }

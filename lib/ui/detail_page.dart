@@ -84,6 +84,20 @@ class _DetailBody extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final collectionsAsync = ref.watch(itemCollectionsProvider(item.id));
+    final allCollections = ref.watch(collectionsProvider).maybeWhen(
+          data: (v) => v,
+          orElse: () => <Collection>[],
+        );
+    final myCollectionNames = collectionsAsync.maybeWhen(
+      data: (ids) => ids
+          .map((id) => allCollections
+              .where((c) => c.id == id)
+              .map((c) => c.name)
+              .firstOrNull)
+          .whereType<String>()
+          .toList(),
+      orElse: () => <String>[],
+    );
     // Web: constrain to a readable column (mobile UI stretched full-width
     // looks broken on desktop — tiny hero, huge empty gutters).
     return Scaffold(
@@ -169,6 +183,11 @@ class _DetailBody extends ConsumerWidget {
                     avatar: const Icon(Icons.forum_outlined, size: 16),
                     label: Text('${item.redditComments} comments')),
               ...item.tags.map((t) => Chip(label: Text('#$t'))),
+              // AI-filed collection shown inline so the filing is visible
+              // without opening the Collections card.
+              ...myCollectionNames.map((n) => Chip(
+                  avatar: const Icon(Icons.auto_awesome_outlined, size: 16),
+                  label: Text(n))),
               Chip(
                 avatar: Icon(
                     item.aiProcessed ? Icons.auto_awesome : Icons.cloud_off_outlined,

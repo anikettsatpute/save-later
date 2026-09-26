@@ -87,7 +87,7 @@ class InboxPage extends ConsumerWidget {
           child: Column(
         children: [
           _StatsHeader(counts: counts, filter: filter, ref: ref),
-          _AiDashboardStrip(counts: counts, ref: ref),
+          const _AiCollectionsStrip(),
           _SearchBar(filter: filter, ref: ref),
           _ActiveChips(filter: filter, ref: ref),
           Expanded(
@@ -259,7 +259,7 @@ class _NavDrawer extends ConsumerWidget {
             if (collections.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                child: Text('Group items beyond categories — e.g. Thesis, Trip.',
+                child: Text('Save items and AI files them here — e.g. AI, Tech, Finance.',
                     style: TextStyle(fontSize: 12)),
               ),
             ...collections.map((c) => FutureBuilder<int>(
@@ -268,7 +268,11 @@ class _NavDrawer extends ConsumerWidget {
                     context,
                     ref,
                     filter,
-                    Icons.folder_outlined,
+                    // AI-created topic collections get a sparkle; manual ones
+                    // keep the folder icon.
+                    _isAiCollection(c.name)
+                        ? Icons.auto_awesome_outlined
+                        : Icons.folder_outlined,
                     '${c.icon ?? ''} ${c.name}'.trim(),
                     snap.data,
                     filter.collectionId == c.id,
@@ -383,119 +387,54 @@ class _StatsHeader extends StatelessWidget {
   }
 }
 
-/// AI dashboard strip: category bars + top topics + top subcategories.
-/// Tapping a bar/chip filters the inbox (category tap) or searches (topic tap).
-class _AiDashboardStrip extends StatelessWidget {
-  final AsyncValue<ItemCounts> counts;
-  final WidgetRef ref;
-  const _AiDashboardStrip({required this.counts, required this.ref});
+/// AI collections strip: horizontal chips of AI-created topic collections
+/// (AI, Tech, Finance, ...) with counts. Tapping filters the inbox.
+/// Shown only when at least one collection exists — replaces the old
+/// AI-overview dashboard card.
+class _AiCollectionsStrip extends ConsumerWidget {
+  const _AiCollectionsStrip();
 
   @override
-  Widget build(BuildContext context) {
-    final c = counts.maybeWhen(data: (v) => v, orElse: () => null);
-    if (c == null || c.inbox == 0) return const SizedBox.shrink();
-    final theme = Theme.of(context);
-    final maxCat = c.perCategory.values.fold<int>(1, (a, b) => a > b ? a : b);
-    final topTopics = c.perTopic.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-    final topSubs = c.perSubcategory.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-      child: Card(
-        margin: EdgeInsets.zero,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const Icon(Icons.auto_awesome, size: 14),
-                  const SizedBox(width: 6),
-                  Text('AI overview', style: theme.textTheme.labelLarge),
-                  const Spacer(),
-                  Text('${c.inbox} items',
-                      style: theme.textTheme.labelSmall
-                          ?.copyWith(color: theme.colorScheme.outline)),
-                ],
-              ),
-              const SizedBox(height: 8),
-              // Category distribution bars (tap to filter).
-              ...Category.values.map((cat) {
-                final n = c.perCategory[cat] ?? 0;
-                if (n == 0) return const SizedBox.shrink();
-                return InkWell(
-                  onTap: () => ref.read(filterProvider.notifier).state =
-                      InboxFilter(category: cat),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 2),
-                    child: Row(
-                      children: [
-                        SizedBox(
-                            width: 92,
-                            child: Text(cat.label,
-                                style: theme.textTheme.labelSmall,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis)),
-                        Expanded(
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(4),
-                            child: LinearProgressIndicator(
-                              value: n / maxCat,
-                              minHeight: 8,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        SizedBox(
-                            width: 28,
-                            child: Text('$n',
-                                textAlign: TextAlign.end,
-                                style: theme.textTheme.labelSmall)),
-                      ],
-                    ),
-                  ),
-                );
-              }),
-              if (topTopics.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 4,
-                  children: [
-                    for (final e in topTopics.take(6))
-                      ActionChip(
-                        label: Text('${e.key} · ${e.value}'),
-                        visualDensity: VisualDensity.compact,
-                        onPressed: () =>
-                            ref.read(filterProvider.notifier).state =
-                                InboxFilter(query: e.key, status: null),
-                      ),
-                  ],
-                ),
-              ],
-              if (topSubs.isNotEmpty) ...[
-                const SizedBox(height: 4),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 4,
-                  children: [
-                    for (final e in topSubs.take(6))
-                      FilterChip(
-                        label: Text('${e.key} · ${e.value}'),
-                        visualDensity: VisualDensity.compact,
-                        selected: false,
-                        onSelected: (_) =>
-                            ref.read(filterProvider.notifier).state =
-                                InboxFilter(query: e.key, status: null),
-                      ),
-                  ],
-                ),
-              ],
-            ],
+  Widget build(BuildContext context, WidgetRef ref) {
+    final collections = ref.watch(collectionsProvider).maybeWhen(
+          data: (v) => v,
+          orElse: () => <Collection>[],
+        );
+    if (collections.isEmpty) return const SizedBox.shrink();
+    final filter = ref.watch(filterProvider);
+    return SizedBox(
+      height: 44,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(right: 4, top: 10),
+            child: Icon(Icons.auto_awesome, size: 14),
           ),
-        ),
+          for (final c in collections)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2),
+              child: FutureBuilder<int>(
+                future:
+                    ref.watch(dbProviderForRetry).collectionCount(c.id),
+                builder: (_, snap) {
+                  final n = snap.data ?? 0;
+                  final selected = filter.collectionId == c.id;
+                  return FilterChip(
+                    label: Text('${c.icon ?? '✨'} ${c.name}${n > 0 ? ' · $n' : ''}'),
+                    visualDensity: VisualDensity.compact,
+                    selected: selected,
+                    onSelected: (_) =>
+                        ref.read(filterProvider.notifier).state = selected
+                            ? const InboxFilter()
+                            : InboxFilter(
+                                collectionId: c.id, status: null),
+                  );
+                },
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -1382,4 +1321,15 @@ class _NoResultsState extends StatelessWidget {
 
 extension<T> on Iterable<T> {
   T? get firstOrNull => isEmpty ? null : first;
+}
+
+/// Names the AI auto-files into (mirrors AiService._guessCollection +
+/// the prompt reuse list). Used only for the drawer icon.
+bool _isAiCollection(String name) {
+  const aiNames = {
+    'ai', 'tech', 'finance', 'stocks', 'shopping', 'politics', 'sports',
+    'health', 'travel', 'food', 'fitness', 'music', 'movies', 'gaming',
+    'business', 'science', 'design', 'learning', 'news',
+  };
+  return aiNames.contains(name.trim().toLowerCase());
 }

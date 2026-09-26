@@ -10,12 +10,13 @@ import 'ai_providers.dart';
 import 'content_fetcher.dart';
 import 'link_parser.dart';
 
-/// AI enrichment result: category + subcategory + topic + summary + tags
-/// + key points + confidence.
+/// AI enrichment result: category + subcategory + topic + collection +
+/// summary + tags + key points + confidence.
 class AiEnrichment {
   final Category category;
   final String subcategory;
   final String topic;
+  final String collection;
   final String summary;
   final List<String> tags;
   final List<String> keyPoints;
@@ -26,6 +27,7 @@ class AiEnrichment {
     required this.category,
     this.subcategory = '',
     this.topic = '',
+    this.collection = '',
     required this.summary,
     required this.tags,
     this.keyPoints = const [],
@@ -220,6 +222,7 @@ class AiService {
       category: category,
       subcategory: AiSubcategories.normalize(category, null),
       topic: meta.title,
+      collection: _guessCollection(hintText),
       summary: summary.length > 220 ? '${summary.substring(0, 220)}…' : summary,
       tags: tags.take(3).toList(),
       keyPoints: const [],
@@ -266,7 +269,7 @@ class AiService {
         titleHint: titleHint,
         ruleSummary: ruleSummary,
         fetchedContent: fetchedContent);
-    final raw = await _complete(prompt, maxTokens: 400, temperature: 0.2);
+    final raw = await _complete(prompt, maxTokens: 500, temperature: 0.2);
     return _parseEnrichment(raw, url, meta);
   }
 
@@ -367,7 +370,7 @@ class AiService {
     }
     final prompt = '''
 You categorize saved links for a read-it-later app. Reply with ONLY valid JSON, no markdown fences:
-{"category": "<one of: $categories>", "subcategory": "<pick from the list for that category below>", "topic": "<3-6 word topic label, e.g. 'flutter riverpod state'>", "summary": "<1-2 line plain-language summary of what this is ABOUT (its topic/content — never describe the act of saving or opening the link)>", "tags": ["<up to 3 lowercase topic tags>"], "key_points": ["<up to 3 short takeaways>"], "confidence": <0.0-1.0>}
+{"category": "<one of: $categories>", "subcategory": "<pick from the list for that category below>", "topic": "<3-6 word topic label, e.g. 'flutter riverpod state'>", "collection": "<ONE short topic-collection name>", "summary": "<1-2 line plain-language summary of what this is ABOUT (its topic/content — never describe the act of saving or opening the link)>", "tags": ["<up to 3 lowercase topic tags>"], "key_points": ["<up to 3 short takeaways>"], "confidence": <0.0-1.0>}
 
 Subcategories per category:
 - Watch: tutorial, vlog, documentary, review, music-video, livestream, shorts, other-video
@@ -378,6 +381,8 @@ Subcategories per category:
 - Ideas: startup, opinion, discussion, inspiration, other-idea
 - Shopping: product, deal, recipe, other-buy
 - Other: other
+
+Collections: "collection" is ONE short topic-collection name the item belongs in — this auto-files it in the app's Collections drawer. Reuse one of these when it fits: AI, Tech, Finance, Stocks, Shopping, Politics, Sports, Health, Travel, Food, Fitness, Music, Movies, Gaming, Business, Science, Design, Learning, News. Only invent a new 1-2 word name when none fits.
 
 Rules: YouTube/music videos -> Watch. Podcasts/audio -> Listen. Movies/series/IMDb -> Movies & Shows. Tutorials/docs/courses -> Learn. Products/deals -> Shopping. Reddit threads/discussions/opinion -> Ideas or Read based on content. News/articles/blogs -> Read. Default Other only if nothing fits.
 
@@ -412,6 +417,7 @@ ${context}''';
         category: fallbackCat,
         subcategory: AiSubcategories.normalize(fallbackCat, null),
         topic: meta.title,
+        collection: _guessCollection('$text ${meta.title}'),
         summary: _cleanProse(text, url, meta),
         tags: const [],
         keyPoints: const [],
@@ -426,6 +432,7 @@ ${context}''';
         category: Category.read,
         subcategory: 'other-read',
         topic: meta.title,
+        collection: _guessCollection(meta.title),
         summary: _cleanProse(text, url, meta),
         tags: const [],
         keyPoints: const [],
@@ -443,10 +450,15 @@ ${context}''';
       summary = _cleanProse(text, url, meta);
     }
     final cat = _parseCategory(parsed['category'] as String?);
+    var collection = normalizeCollection(parsed['collection'] as String?);
+    collection = collection.isEmpty
+        ? _guessCollection('$summary ${parsed['topic'] ?? ''}')
+        : collection;
     return AiEnrichment(
       category: cat,
       subcategory: AiSubcategories.normalize(cat, parsed['subcategory'] as String?),
       topic: ((parsed['topic'] as String?) ?? '').trim(),
+      collection: collection,
       summary: summary,
       tags: ((parsed['tags'] as List?) ?? []).map((e) => e.toString().toLowerCase()).take(3).toList(),
       keyPoints: ((parsed['key_points'] as List?) ?? [])
@@ -527,6 +539,63 @@ ${context}''';
     return Category.other;
   }
 
+  /// Normalizes a raw AI collection name to Title Case, 1-2 words.
+  /// Returns '' when nothing usable remains (caller skips auto-attach).
+  static String normalizeCollection(String? raw) {
+    var t = (raw ?? '').trim();
+    if (t.isEmpty) return '';
+    t = t
+        .replaceAll(RegExp(r'[^A-Za-z0-9 &/\-]'), '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (t.isEmpty) return '';
+    final titled = t
+        .split(' ')
+        .take(2)
+        .map((w) => w.isEmpty
+            ? ''
+            : '${w[0].toUpperCase()}${w.length > 1 ? w.substring(1).toLowerCase() : ''}')
+        .where((w) => w.isNotEmpty)
+        .join(' ');
+    return titled.length > 24 ? '' : titled;
+  }
+
+  /// Offline/topic guess for a collection name from free text.
+  /// Mirrors the AI reuse list so offline + AI saves land together.
+  static String _guessCollection(String text) {
+    final t = text.toLowerCase();
+    bool has(List<String> keys) => keys.any((k) => t.contains(k));
+    if (has(const ['stock', 'share market', 'nifty', 'sensex', 'investing', 'portfolio', 'trading'])) {
+      return 'Stocks';
+    }
+    if (has(const ['crypto', 'bitcoin', 'finance', 'money', 'bank', 'loan', 'insurance', 'tax'])) {
+      return 'Finance';
+    }
+    if (has(const ['artificial intelligence', 'machine learning', ' llm', 'gpt', 'agent', 'chatbot'])) {
+      return 'AI';
+    }
+    if (has(const ['politic', 'election', 'government', 'policy', 'minister', 'parliament'])) {
+      return 'Politics';
+    }
+    if (has(const ['shop', 'deal', 'price', 'buy', 'product', 'discount', 'coupon'])) {
+      return 'Shopping';
+    }
+    if (has(const ['sport', 'cricket', 'football', 'tennis', 'ipl', 'olympic'])) return 'Sports';
+    if (has(const ['health', 'fitness', 'workout', 'diet', 'yoga', 'mental health'])) return 'Health';
+    if (has(const ['travel', 'trip', 'flight', 'hotel', 'visa', 'itinerary'])) return 'Travel';
+    if (has(const ['food', 'cook', 'recipe', 'restaurant'])) return 'Food';
+    if (has(const ['music', 'song', 'album', 'playlist'])) return 'Music';
+    if (has(const ['movie', 'film', 'series', 'trailer', 'imdb', 'netflix'])) return 'Movies';
+    if (has(const ['game', 'gaming', 'esports'])) return 'Gaming';
+    if (has(const ['business', 'startup', 'founder', 'funding'])) return 'Business';
+    if (has(const ['science', 'space', 'physics', 'research', 'paper', 'study'])) return 'Science';
+    if (has(const ['design', ' ui', 'ux', 'figma'])) return 'Design';
+    if (has(const ['flutter', 'android', 'software', 'programming', 'gadget', 'tech'])) return 'Tech';
+    if (has(const ['tutorial', 'course', 'learn', 'howto', 'exam'])) return 'Learning';
+    if (has(const ['news', 'breaking', 'headline'])) return 'News';
+    return '';
+  }
+
   // ------------------------------------------------------------ ask AI chat
   /// Builds the shared item context block used for Q&A. Highlights and the
   /// user's own note are included — Obsidian-style: your words anchor the AI.
@@ -537,6 +606,7 @@ ${context}''';
       ..writeln('Site: ${item.siteName ?? 'unknown'}')
       ..writeln('Author: ${item.author ?? 'unknown'}')
       ..writeln('Type: ${item.type.name}, Category: ${item.category.label}');
+    if (item.aiTopic?.isNotEmpty == true) b.writeln('AI topic: ${item.aiTopic}');
     if (item.subreddit != null) {
       b.writeln(
           'Subreddit: r/${item.subreddit} (score ${item.redditScore ?? '?'}, comments ${item.redditComments ?? '?'})');

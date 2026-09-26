@@ -173,7 +173,7 @@ final countsProvider = FutureProvider<ItemCounts>((ref) async {
   for (final c in Category.values) {
     perCategory[c] = await db.count(status: ItemStatus.inbox, category: c);
   }
-  // Topic/subcategory breakdown for the dashboard (inbox scope).
+  // Topic/subcategory breakdown (kept for search + future use).
   final inboxItems = await db.list(status: ItemStatus.inbox);
   final perTopic = <String, int>{};
   final perSubcategory = <String, int>{};
@@ -316,6 +316,27 @@ class SaveController extends StateNotifier<AsyncValue<void>> {
             : meta.articleText,
       );
       await db.upsert(item);
+      // AI collection auto-file: find-or-create a collection named
+      // enrichment.collection ("AI", "Stocks", "Finance", ...) and
+      // attach the item. Case-insensitive match so AI + offline saves land
+      // together. Never blocks the save on failure.
+      final collectionName = enrichment.collection.trim();
+      if (collectionName.isNotEmpty) {
+        try {
+          final existing = await db.collections();
+          Collection? match;
+          for (final c in existing) {
+            if (c.name.trim().toLowerCase() == collectionName.toLowerCase()) {
+              match = c;
+              break;
+            }
+          }
+          match ??= await _createCollection(db, collectionName);
+          if (match != null) {
+            await db.setItemCollections(item.id, [match.id]);
+          }
+        } catch (_) {}
+      }
       _ref.invalidate(itemsProvider);
       _bumpData(_ref);
       state = const AsyncValue.data(null);
@@ -339,6 +360,24 @@ class SaveController extends StateNotifier<AsyncValue<void>> {
       if (hay.contains(r.match.trim().toLowerCase())) return r;
     }
     return null;
+  }
+
+  /// Creates a collection on any store (local sqflite / web / Firestore)
+  /// and returns it. Null only when the store throws.
+  Future<Collection?> _createCollection(dynamic db, String name) async {
+    try {
+      final existing = await db.collections() as List<Collection>;
+      final c = Collection(
+        id: _uuid.v4(),
+        name: name,
+        sortOrder: existing.length,
+        createdAt: DateTime.now(),
+      );
+      await db.upsertCollection(c);
+      return c;
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> setStatus(String id, ItemStatus status) async {

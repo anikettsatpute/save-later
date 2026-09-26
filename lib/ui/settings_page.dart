@@ -168,6 +168,33 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       aiKeyPoints: e.keyPoints,
       aiConfidence: e.confidence,
     ));
+    // Same AI-collection auto-file as the save path (find-or-create).
+    final name = e.collection.trim();
+    if (name.isNotEmpty) {
+      try {
+        final existing = await db.collections() as List<Collection>;
+        Collection? match;
+        for (final c in existing) {
+          if (c.name.trim().toLowerCase() == name.toLowerCase()) {
+            match = c;
+            break;
+          }
+        }
+        match ??= Collection(
+          id: const Uuid().v4(),
+          name: name,
+          sortOrder: existing.length,
+          createdAt: DateTime.now(),
+        );
+        // Persist the new collection row when we just created it.
+        if (!(await db
+                .collections()
+                .then((l) => (l as List<Collection>).any((c) => c.id == match!.id)))) {
+          await db.upsertCollection(match);
+        }
+        await db.setItemCollections(itemId, [match.id]);
+      } catch (_) {}
+    }
   }
 
   @override

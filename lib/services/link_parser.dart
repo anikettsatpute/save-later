@@ -131,13 +131,42 @@ class LinkParser {
         );
       }
     } catch (_) {}
-    // oEmbed blocked/failed (Shorts, embeds disabled, no network): still
-    // return a usable meta with thumbnail so the card isn't empty.
+    // oEmbed blocked/failed (embeds disabled, no network): try the
+    // watch-page <title> ("Real Title - YouTube") so cards/AI never show
+    // just "youtube.com". Thumbnail works from the id alone.
     final videoId = _extractYoutubeId(url);
+    final thumb = videoId != null ? 'https://i.ytimg.com/vi/$videoId/hqdefault.jpg' : null;
+    if (videoId != null) {
+      try {
+        final res = await _get(
+            'https://www.youtube.com/watch?v=$videoId&hl=en',
+            headers: {'User-Agent': _browserUa, 'Accept-Language': 'en-US,en;q=0.9'},
+            timeout: const Duration(seconds: 10));
+        final m = res == null
+            ? null
+            : RegExp(r'<title>(.*?)</title>', caseSensitive: false, dotAll: true)
+                .firstMatch(res.body)
+                ?.group(1);
+        var t = m == null ? null : _clean(m.replaceAll(RegExp(r'\s+'), ' '));
+        if (t != null && t.toLowerCase().endsWith(' - youtube')) {
+          t = t.substring(0, t.length - ' - youtube'.length).trim();
+        }
+        if (t != null && t.isNotEmpty && t.toLowerCase() != 'youtube') {
+          return LinkMeta(
+            title: t,
+            type: ItemType.youtube,
+            thumbnailUrl: thumb,
+            description: null,
+            siteName: 'YouTube',
+            isVideo: true,
+          );
+        }
+      } catch (_) {}
+    }
     return LinkMeta(
-      title: _fallbackTitle(url),
+      title: videoId != null ? 'YouTube video ($videoId)' : _fallbackTitle(url),
       type: ItemType.youtube,
-      thumbnailUrl: videoId != null ? 'https://i.ytimg.com/vi/$videoId/hqdefault.jpg' : null,
+      thumbnailUrl: thumb,
       description: null,
       siteName: 'YouTube',
       isVideo: true,
@@ -202,9 +231,22 @@ class LinkParser {
         );
       }
     } catch (_) {
-      // fall through to base
+      // fall through to slug/base below
     }
-    return base;
+    if (base != null) return base;
+    // Last resort — never return null: the URL slug carries the real title
+    // ("/comments/<id>/ashneer_day_by_day/") so cards never read "reddit".
+    final slug = _redditSlugTitle(canonical);
+    final subM = RegExp(r'/r/([A-Za-z0-9_]+)').firstMatch(canonical);
+    if (slug != null) {
+      return LinkMeta(
+        title: slug,
+        type: ItemType.reddit,
+        siteName: 'Reddit',
+        subreddit: subM?.group(1),
+      );
+    }
+    return null;
   }
 
   /// PullPush post lookup by direct id. Same shape as Arctic (title,
@@ -374,7 +416,6 @@ class LinkParser {
   /// in og:description), else a clean "Instagram post by @user" fallback with
   /// the shortcode as context for AI.
   static Future<LinkMeta?> _instagramRich(String url) async {
-    final shortcode = _instagramShortcode(url);
     final username = _instagramUsername(url);
 
     // 1. Public oEmbed (no key; verified 2026-09-26 returns title/author/thumb).
@@ -426,32 +467,22 @@ class LinkParser {
       }
     } catch (_) {}
 
-    // 3. Clean fallback — shortcode + username give AI something to work with.
-    final label = username != null ? 'Instagram post by @$username' : 'Instagram post';
+    // 3. Clean fallback — never put the shortcode id in the title (users
+    // reported cards reading just an id). Kind-aware label instead.
+    final isReel = url.contains('/reel');
+    final label = username != null
+        ? '${isReel ? 'Reel' : 'Post'} by @$username'
+        : (isReel ? 'Instagram reel' : 'Instagram post');
     return LinkMeta(
-      title: shortcode != null ? '$label ($shortcode)' : label,
+      title: label,
       type: ItemType.instagram,
       author: username != null ? '@$username' : null,
       siteName: 'Instagram',
-      isVideo: url.contains('/reel'),
+      isVideo: isReel,
       description: username != null
-          ? 'Instagram post/reel by @$username. Open in Instagram to view.'
-          : 'Instagram post. Open in Instagram to view.',
+          ? 'Instagram ${isReel ? 'reel' : 'post'} by @$username. Open in Instagram to view.'
+          : 'Instagram ${isReel ? 'reel' : 'post'}. Open in Instagram to view.',
     );
-  }
-
-  static String? _instagramShortcode(String url) {
-    try {
-      final uri = Uri.parse(url);
-      final segs = uri.pathSegments.where((s) => s.isNotEmpty).toList();
-      // /p/<code>, /reel/<code>, /reels/<code>, /tv/<code>
-      for (var i = 0; i < segs.length - 1; i++) {
-        if (['p', 'reel', 'reels', 'tv'].contains(segs[i].toLowerCase())) {
-          return segs[i + 1];
-        }
-      }
-    } catch (_) {}
-    return null;
   }
 
   static String? _instagramUsername(String url) {
@@ -633,9 +664,19 @@ class LinkParser {
   static String? _extractYoutubeId(String url) {
     final uri = Uri.tryParse(url);
     if (uri == null) return null;
-    if (uri.host.contains('youtu.be')) return uri.pathSegments.isNotEmpty ? uri.pathSegments.first : null;
-    if (uri.host.contains('music.youtube')) return uri.queryParameters['v'];
-    return uri.queryParameters['v'];
+    if (uri.host.contains('youtu.be')) {
+      return uri.pathSegments.isNotEmpty ? uri.pathSegments.first.split('?').first : null;
+    }
+    final v = uri.queryParameters['v'];
+    if (v != null && v.isNotEmpty) return v;
+    // /shorts/<id>, /live/<id>, /embed/<id>, /v/<id> carry no ?v= param.
+    final segs = uri.pathSegments;
+    for (var i = 0; i < segs.length - 1; i++) {
+      if (['shorts', 'live', 'embed', 'v'].contains(segs[i].toLowerCase())) {
+        return segs[i + 1].split('?').first;
+      }
+    }
+    return null;
   }
 
   static String? _validThumb(String? t) {
