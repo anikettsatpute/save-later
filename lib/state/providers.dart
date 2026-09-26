@@ -8,6 +8,7 @@ import '../data/web_store.dart';
 import '../models/saved_item.dart';
 import '../services/ai_service.dart';
 import '../services/auth_service.dart';
+import '../services/content_fetcher.dart';
 import '../services/link_parser.dart';
 import '../services/reminder_service.dart';
 import '../services/share_parser.dart';
@@ -151,8 +152,15 @@ class ItemCounts {
   final int done;
   final int unreadAi;
   final Map<Category, int> perCategory;
+  final Map<String, int> perTopic;
+  final Map<String, int> perSubcategory;
   const ItemCounts(
-      {required this.inbox, required this.done, required this.unreadAi, required this.perCategory});
+      {required this.inbox,
+      required this.done,
+      required this.unreadAi,
+      required this.perCategory,
+      this.perTopic = const {},
+      this.perSubcategory = const {}});
 }
 
 final countsProvider = FutureProvider<ItemCounts>((ref) async {
@@ -165,7 +173,23 @@ final countsProvider = FutureProvider<ItemCounts>((ref) async {
   for (final c in Category.values) {
     perCategory[c] = await db.count(status: ItemStatus.inbox, category: c);
   }
-  return ItemCounts(inbox: inbox, done: done, unreadAi: unreadAi, perCategory: perCategory);
+  // Topic/subcategory breakdown for the dashboard (inbox scope).
+  final inboxItems = await db.list(status: ItemStatus.inbox);
+  final perTopic = <String, int>{};
+  final perSubcategory = <String, int>{};
+  for (final it in inboxItems) {
+    final t = (it.aiTopic ?? '').trim();
+    if (t.isNotEmpty) perTopic[t] = (perTopic[t] ?? 0) + 1;
+    final s = (it.aiSubcategory ?? '').trim();
+    if (s.isNotEmpty) perSubcategory[s] = (perSubcategory[s] ?? 0) + 1;
+  }
+  return ItemCounts(
+      inbox: inbox,
+      done: done,
+      unreadAi: unreadAi,
+      perCategory: perCategory,
+      perTopic: perTopic,
+      perSubcategory: perSubcategory);
 });
 
 final collectionsProvider = FutureProvider<List<Collection>>((ref) async {
@@ -222,9 +246,26 @@ class SaveController extends StateNotifier<AsyncValue<void>> {
       // Auto-tag rules run before AI (user pipeline wins).
       final rules = await db.tagRules();
       final ruleHit = _matchRule(rules, url, meta);
+      // Prefetch platform body ONCE (YouTube oEmbed+watch page, Reddit
+      // PullPush+Arctic, Instagram oEmbed+embed caption) so the AI prompt
+      // and the stored bodyText share the same content — no double fetch.
+      String? fetchedContent;
+      try {
+        fetchedContent = await ContentFetcher.fetchFor(url, meta.type.name);
+      } catch (_) {}
       phase.state = SavePhase.ai;
       final ai = _ref.read(_aiProvider);
-      final result = await ai.enrichWithFlag(url: url, meta: meta);
+      final result = await ai.enrichWithFlag(
+        url: url,
+        meta: meta,
+        userNote: (note?.trim().isNotEmpty ?? false) ? note!.trim() : null,
+        titleHint:
+            (parsed.titleHint?.trim().isNotEmpty ?? false) ? parsed.titleHint!.trim() : null,
+        ruleSummary: ruleHit != null
+            ? 'match=\"${ruleHit.match}\" category=${ruleHit.category?.name ?? 'none'} tags=[${ruleHit.tags.join(', ')}]'
+            : null,
+        fetchedContent: fetchedContent,
+      );
       final enrichment = result.enrichment;
       phase.state = SavePhase.saving;
       final tags = <String>{
@@ -260,7 +301,19 @@ class SaveController extends StateNotifier<AsyncValue<void>> {
         redditScore: meta.redditScore,
         redditComments: meta.redditComments,
         isVideo: meta.isVideo,
-        bodyText: meta.articleText,
+        // v5 AI taxonomy: topic + subcategory + key points + confidence.
+        aiTopic: enrichment.topic.isNotEmpty ? enrichment.topic : null,
+        aiSubcategory: enrichment.subcategory.isNotEmpty ? enrichment.subcategory : null,
+        aiKeyPoints: enrichment.keyPoints,
+        aiConfidence: result.usedAi ? enrichment.confidence : null,
+        // Persist the full fetched platform body (not just articleText) so
+        // askAboutItem + future re-classification see the same content the
+        // classifier saw. Prefers fetched (YouTube/Reddit/Instagram) content.
+        bodyText: (fetchedContent != null && fetchedContent.isNotEmpty)
+            ? (fetchedContent.length > 6000
+                ? '${fetchedContent.substring(0, 6000)}…'
+                : fetchedContent)
+            : meta.articleText,
       );
       await db.upsert(item);
       _ref.invalidate(itemsProvider);

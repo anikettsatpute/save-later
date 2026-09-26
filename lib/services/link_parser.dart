@@ -377,20 +377,28 @@ class LinkParser {
     final shortcode = _instagramShortcode(url);
     final username = _instagramUsername(url);
 
-    // 1. Public oEmbed (works for some posts without auth).
+    // 1. Public oEmbed (no key; verified 2026-09-26 returns title/author/thumb).
     try {
       final res = await _get(
-          'https://www.instagram.com/oembed?url=${Uri.encodeComponent(url)}',
+          'https://www.instagram.com/api/v1/oembed/?url=${Uri.encodeComponent(url)}',
           headers: {'User-Agent': _browserUa},
           timeout: const Duration(seconds: 10));
       if (res != null && res.statusCode == 200) {
         final j = jsonDecode(res.body) as Map<String, dynamic>;
+        final oembedTitle = (j['title'] as String?)?.trim();
+        final oembedAuthor =
+            (j['author_name'] as String?) ?? (username != null ? '@$username' : null);
         return LinkMeta(
-          title: (j['title'] as String?) ??
-              (username != null ? 'Instagram post by @$username' : 'Instagram post'),
+          title: oembedTitle?.isNotEmpty == true
+              ? oembedTitle!
+              : (username != null ? 'Instagram post by @$username' : 'Instagram post'),
           type: ItemType.instagram,
-          author: (j['author_name'] as String?) ?? (username != null ? '@$username' : null),
+          author: oembedAuthor,
           thumbnailUrl: _validThumb(j['thumbnail_url'] as String?),
+          // oEmbed title IS the caption snippet — expose it as description
+          // so the AI classifier sees it even when page scrape is blocked.
+          description: oembedTitle?.isNotEmpty == true ? oembedTitle : null,
+          excerpt: oembedTitle?.isNotEmpty == true ? _clip(oembedTitle!, 500) : null,
           siteName: 'Instagram',
           isVideo: (j['html'] as String?)?.contains('<video') == true ||
               url.contains('/reel'),

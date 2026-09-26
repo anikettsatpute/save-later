@@ -5,6 +5,33 @@ enum ItemStatus { inbox, done, archived }
 
 enum Category { watch, read, listen, moviesShows, learn, ideas, shopping, other }
 
+/// AI subcategory taxonomy (v5). Kept as free-form String on the model so
+/// new values don't break old rows; [AiSubcategories.forCategory] is the
+/// closed list the classifier must pick from.
+class AiSubcategories {
+  static const Map<Category, List<String>> forCategory = {
+    Category.watch: ['tutorial', 'vlog', 'documentary', 'review', 'music-video', 'livestream', 'shorts', 'other-video'],
+    Category.read: ['news', 'blog', 'essay', 'thread', 'documentation', 'other-read'],
+    Category.listen: ['podcast', 'song', 'audiobook', 'other-audio'],
+    Category.moviesShows: ['movie', 'series', 'trailer', 'other-screen'],
+    Category.learn: ['course', 'howto', 'reference', 'paper', 'other-learn'],
+    Category.ideas: ['startup', 'opinion', 'discussion', 'inspiration', 'other-idea'],
+    Category.shopping: ['product', 'deal', 'recipe', 'other-buy'],
+    Category.other: ['other'],
+  };
+
+  static String normalize(Category category, String? raw) {
+    final allowed = forCategory[category] ?? const ['other'];
+    final t = (raw ?? '').trim().toLowerCase().replaceAll(RegExp(r'[^a-z-]'), '');
+    if (allowed.contains(t)) return t;
+    // Fuzzy: accept close variants ("tutorials" -> "tutorial").
+    for (final a in allowed) {
+      if (t.startsWith(a) || a.startsWith(t) && t.isNotEmpty) return a;
+    }
+    return allowed.last;
+  }
+}
+
 extension CategoryLabel on Category {
   String get label => switch (this) {
         Category.watch => 'Watch',
@@ -155,6 +182,11 @@ class SavedItem {
   final String? bodyText;
   final String? userNote;
   final DateTime? remindAt;
+  // v5 fields: AI topic + subcategory + key points (nullable, old rows load).
+  final String? aiTopic;
+  final String? aiSubcategory;
+  final List<String> aiKeyPoints;
+  final double? aiConfidence;
 
   const SavedItem({
     required this.id,
@@ -180,6 +212,10 @@ class SavedItem {
     this.bodyText,
     this.userNote,
     this.remindAt,
+    this.aiTopic,
+    this.aiSubcategory,
+    this.aiKeyPoints = const [],
+    this.aiConfidence,
   });
 
   SavedItem copyWith({
@@ -203,6 +239,10 @@ class SavedItem {
     String? bodyText,
     String? userNote,
     DateTime? Function()? remindAt,
+    String? aiTopic,
+    String? aiSubcategory,
+    List<String>? aiKeyPoints,
+    double? aiConfidence,
   }) {
     return SavedItem(
       id: id,
@@ -228,6 +268,10 @@ class SavedItem {
       bodyText: bodyText ?? this.bodyText,
       userNote: userNote ?? this.userNote,
       remindAt: remindAt != null ? remindAt() : this.remindAt,
+      aiTopic: aiTopic ?? this.aiTopic,
+      aiSubcategory: aiSubcategory ?? this.aiSubcategory,
+      aiKeyPoints: aiKeyPoints ?? this.aiKeyPoints,
+      aiConfidence: aiConfidence ?? this.aiConfidence,
     );
   }
 
@@ -255,6 +299,10 @@ class SavedItem {
         'bodyText': bodyText,
         'userNote': userNote,
         'remindAt': remindAt?.millisecondsSinceEpoch,
+        'aiTopic': aiTopic,
+        'aiSubcategory': aiSubcategory,
+        'aiKeyPoints': aiKeyPoints.join('\n'),
+        'aiConfidence': aiConfidence,
       };
 
   factory SavedItem.fromMap(Map<String, dynamic> m) => SavedItem(
@@ -285,5 +333,19 @@ class SavedItem {
         remindAt: m['remindAt'] == null
             ? null
             : DateTime.fromMillisecondsSinceEpoch((num.tryParse('${m['remindAt']}') ?? 0).toInt()),
+        aiTopic: m['aiTopic'] == null ? null : '${m['aiTopic']}',
+        aiSubcategory: m['aiSubcategory'] == null ? null : '${m['aiSubcategory']}',
+        aiKeyPoints: switch (m['aiKeyPoints']) {
+          null => const [],
+          final List l => l.map((e) => '$e').where((e) => e.isNotEmpty).toList(),
+          _ => '${m['aiKeyPoints']}'
+              .split('\n')
+              .map((e) => e.trim())
+              .where((e) => e.isNotEmpty)
+              .toList(),
+        },
+        aiConfidence: m['aiConfidence'] == null
+            ? null
+            : (num.tryParse('${m['aiConfidence']}') ?? 0).toDouble(),
       );
 }

@@ -57,9 +57,17 @@ class _SaveLaterAppState extends State<SaveLaterApp> {
   @override
   void initState() {
     super.initState();
-    // Share intents only exist on mobile. On web/desktop the plugin throws
+    // Web: browser-extension / Web Share Target deep link
+    // (?url= / ?text= / ?title=). Handled after first frame so the
+    // navigator context exists, then the normal save sheet takes over
+    // (LinkParser + AI enrich are reused — no auth needed in extension).
+    if (kIsWeb) {
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _handleWebDeepLink());
+      return;
+    }
+    // Share intents only exist on mobile. On desktop the plugin throws
     // MissingPluginException — skip entirely (browser test found this).
-    if (kIsWeb) return;
     try {
       // Cold start from a share.
       ReceiveSharingIntent.instance.getInitialMedia().then(_handleShared);
@@ -78,16 +86,55 @@ class _SaveLaterAppState extends State<SaveLaterApp> {
     if (combined.isEmpty) return;
     final parsed = ShareParser.parse(combined);
     if (parsed.url == null) return; // nothing usable shared
+    _openAddSheet(parsed.url!, parsed.titleHint, resetShare: true);
+  }
+
+  /// Web entry from the browser extension or OS share sheet:
+  /// `/?url=...&title=...&text=...`
+  /// Web Share Target delivers `title`, `text`, `url` the same way.
+  void _handleWebDeepLink() {
+    if (_sheetOpen) return;
+    final params = Uri.base.queryParameters;
+    if (params.isEmpty) return;
+    final rawUrl = (params['url'] ?? '').trim();
+    final text = (params['text'] ?? '').trim();
+    final title = (params['title'] ?? '').trim();
+    // Prefer explicit url=, else extract first http(s) URL from text/title.
+    final rawParsed = rawUrl.isNotEmpty ? ShareParser.parse(rawUrl) : null;
+    final ShareParseResult parsed;
+    if (rawParsed?.url != null) {
+      parsed = rawParsed!;
+    } else {
+      // Fall through to combined text when url= is missing or unusable.
+      final combined = [text, title, rawUrl]
+          .where((s) => s.isNotEmpty)
+          .join('\n');
+      if (combined.isEmpty) return;
+      parsed = ShareParser.parse(combined);
+    }
+    if (parsed.url == null) return;
+    // Extension tab title wins as the note; else keep the shared hint.
+    final note = title.isNotEmpty && !title.contains(parsed.url!)
+        ? title
+        : parsed.titleHint;
+    _openAddSheet(parsed.url!, note, resetShare: false);
+  }
+
+  void _openAddSheet(String url, String? note, {required bool resetShare}) {
     final ctx = _navigatorKey.currentContext;
     if (ctx == null) return;
     _sheetOpen = true;
     showModalBottomSheet(
       context: ctx,
       isScrollControlled: true,
-      builder: (_) => AddSheet(initialUrl: parsed.url!, initialNote: parsed.titleHint),
+      builder: (_) => AddSheet(initialUrl: url, initialNote: note),
     ).whenComplete(() {
       _sheetOpen = false;
-      ReceiveSharingIntent.instance.reset();
+      if (resetShare) {
+        try {
+          ReceiveSharingIntent.instance.reset();
+        } catch (_) {}
+      }
     });
   }
 

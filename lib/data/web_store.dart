@@ -23,6 +23,12 @@ class WebStore {
   Future<void> updateFields(String id, Map<String, Object?> fields) async {
     final item = _items[id];
     if (item == null) return;
+    List<String> keyPointsOf(Object? v, List<String> fallback) {
+      if (v == null) return fallback;
+      if (v is List) return v.map((e) => '$e').where((e) => e.isNotEmpty).toList();
+      return '$v'.split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+    }
+
     _items[id] = SavedItem(
       id: item.id,
       url: item.url,
@@ -56,6 +62,18 @@ class WebStore {
               : DateTime.fromMillisecondsSinceEpoch(
                   (fields['remindAt'] as int)))
           : item.remindAt,
+      aiTopic: fields.containsKey('aiTopic')
+          ? fields['aiTopic'] as String?
+          : item.aiTopic,
+      aiSubcategory: fields.containsKey('aiSubcategory')
+          ? fields['aiSubcategory'] as String?
+          : item.aiSubcategory,
+      aiKeyPoints: fields.containsKey('aiKeyPoints')
+          ? keyPointsOf(fields['aiKeyPoints'], item.aiKeyPoints)
+          : item.aiKeyPoints,
+      aiConfidence: fields.containsKey('aiConfidence')
+          ? (fields['aiConfidence'] as num?)?.toDouble()
+          : item.aiConfidence,
     );
   }
 

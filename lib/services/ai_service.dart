@@ -10,14 +10,28 @@ import 'ai_providers.dart';
 import 'content_fetcher.dart';
 import 'link_parser.dart';
 
-/// AI enrichment result: category + summary + tags.
+/// AI enrichment result: category + subcategory + topic + summary + tags
+/// + key points + confidence.
 class AiEnrichment {
   final Category category;
+  final String subcategory;
+  final String topic;
   final String summary;
   final List<String> tags;
+  final List<String> keyPoints;
+  final double confidence;
   final String? error; // surfaced in UI when Gemini fails (no silent fallback)
 
-  const AiEnrichment({required this.category, required this.summary, required this.tags, this.error});
+  const AiEnrichment({
+    required this.category,
+    this.subcategory = '',
+    this.topic = '',
+    required this.summary,
+    required this.tags,
+    this.keyPoints = const [],
+    this.confidence = 0,
+    this.error,
+  });
 }
 
 /// Rules fallback so the app works with no key / offline.
@@ -115,9 +129,18 @@ class AiService {
   }
 
   /// Returns (enrichment, usedAi). `usedAi` false means rules fallback.
+  /// [userNote]/[titleHint] come from the save sheet / share intent — the
+  /// classifier must see them. [fetchedContent] is the pre-fetched
+  /// YouTube/Reddit/Instagram body so we don't fetch twice; when null the
+  /// prompt fetches it itself. [ruleSummary] tells the AI which user rule
+  /// already fired so it doesn't fight the pipeline.
   Future<({AiEnrichment enrichment, bool usedAi})> enrichWithFlag({
     required String url,
     required LinkMeta meta,
+    String? userNote,
+    String? titleHint,
+    String? ruleSummary,
+    String? fetchedContent,
   }) async {
     final provider = await getProvider();
     final hasCreds = switch (provider) {
@@ -126,18 +149,29 @@ class AiService {
       AiProviderKind.azure => (await getAzure()).isComplete,
     };
     if (!hasCreds) {
-      return (enrichment: _rules(url, meta), usedAi: false);
+      return (
+        enrichment: _rules(url, meta, userNote: userNote, titleHint: titleHint),
+        usedAi: false
+      );
     }
     try {
-      final e = await _enrichVia(provider, url, meta);
+      final e = await _enrichVia(provider, url, meta,
+          userNote: userNote,
+          titleHint: titleHint,
+          ruleSummary: ruleSummary,
+          fetchedContent: fetchedContent);
       return (enrichment: e, usedAi: true);
     } catch (e) {
-      final fallback = _rules(url, meta);
+      final fallback = _rules(url, meta, userNote: userNote, titleHint: titleHint);
       return (
         enrichment: AiEnrichment(
           category: fallback.category,
+          subcategory: fallback.subcategory,
+          topic: fallback.topic,
           summary: fallback.summary,
           tags: fallback.tags,
+          keyPoints: fallback.keyPoints,
+          confidence: fallback.confidence,
           error: _friendlyError(e),
         ),
         usedAi: false,
@@ -159,13 +193,17 @@ class AiService {
     return 'AI unavailable ($s). Saved with offline tags.';
   }
 
-  AiEnrichment _rules(String url, LinkMeta meta) {
+  AiEnrichment _rules(String url, LinkMeta meta, {String? userNote, String? titleHint}) {
     final type = meta.type;
+    // User note + share hint join the offline guess input so no-key saves
+    // still categorize from what the user told us, not just the URL.
+    final hintText =
+        '${meta.title} ${meta.description ?? ''} ${meta.siteName ?? ''} ${userNote ?? ''} ${titleHint ?? ''}';
     final category = switch (type) {
       ItemType.youtube || ItemType.tiktok || ItemType.instagram => Category.watch,
       ItemType.reddit || ItemType.x => Category.read,
       ItemType.movie => Category.moviesShows,
-      _ => _guessFromText('${meta.title} ${meta.description ?? ''} ${meta.siteName ?? ''}'),
+      _ => _guessFromText(hintText),
     };
     // Never leave the summary empty: fall back to a human sentence built
     // from whatever the parser did get (fixes "Saved link" cards).
@@ -180,8 +218,12 @@ class AiService {
     }
     return AiEnrichment(
       category: category,
+      subcategory: AiSubcategories.normalize(category, null),
+      topic: meta.title,
       summary: summary.length > 220 ? '${summary.substring(0, 220)}…' : summary,
       tags: tags.take(3).toList(),
+      keyPoints: const [],
+      confidence: 0,
     );
   }
 
@@ -214,8 +256,16 @@ class AiService {
   }
 
   Future<AiEnrichment> _enrichVia(
-      AiProviderKind provider, String url, LinkMeta meta) async {
-    final prompt = await _categorizePrompt(url, meta);
+      AiProviderKind provider, String url, LinkMeta meta,
+      {String? userNote,
+      String? titleHint,
+      String? ruleSummary,
+      String? fetchedContent}) async {
+    final prompt = await _categorizePrompt(url, meta,
+        userNote: userNote,
+        titleHint: titleHint,
+        ruleSummary: ruleSummary,
+        fetchedContent: fetchedContent);
     final raw = await _complete(prompt, maxTokens: 400, temperature: 0.2);
     return _parseEnrichment(raw, url, meta);
   }
@@ -271,7 +321,11 @@ class AiService {
     }
   }
 
-  Future<String> _categorizePrompt(String url, LinkMeta meta) async {
+  Future<String> _categorizePrompt(String url, LinkMeta meta,
+      {String? userNote,
+      String? titleHint,
+      String? ruleSummary,
+      String? fetchedContent}) async {
     const categories = 'Watch, Read, Listen, Movies & Shows, Learn, Ideas, Shopping, Other';
     final context = StringBuffer()
       ..writeln('URL: $url')
@@ -279,27 +333,51 @@ class AiService {
       ..writeln('Site: ${meta.siteName ?? 'unknown'}')
       ..writeln('Author: ${meta.author ?? 'unknown'}')
       ..writeln('Detected type: ${meta.type.name}');
+    if (userNote?.trim().isNotEmpty == true) {
+      context.writeln('User note (highest priority signal): ${userNote!.trim()}');
+    }
+    if (titleHint?.trim().isNotEmpty == true) {
+      context.writeln('Share title hint: ${titleHint!.trim()}');
+    }
+    if (ruleSummary?.trim().isNotEmpty == true) {
+      context.writeln('User rule already applied: ${ruleSummary!.trim()}');
+    }
     if (meta.subreddit != null) {
       context.writeln('Subreddit: r/${meta.subreddit} (score ${meta.redditScore ?? '?'}, comments ${meta.redditComments ?? '?'})');
     }
     if (meta.readingMinutes != null) context.writeln('Reading time: ~${meta.readingMinutes} min');
     if (meta.excerpt?.isNotEmpty == true) context.writeln('Excerpt: ${meta.excerpt}');
     if (meta.articleText?.isNotEmpty == true) {
-      context.writeln('Article start: ${meta.articleText!.substring(0, meta.articleText!.length.clamp(0, 1500))}');
+      context.writeln('Article start: ${meta.articleText!.substring(0, meta.articleText!.length.clamp(0, 2000))}');
     } else if (meta.description?.isNotEmpty == true) {
-      context.writeln('Description: ${meta.description!.substring(0, meta.description!.length.clamp(0, 800))}');
+      context.writeln('Description: ${meta.description!.substring(0, meta.description!.length.clamp(0, 1500))}');
     }
-    // Content fetchers (YouTube/Reddit/Instagram): real post text so tags
-    // come from CONTENT, not just the title. Best-effort, skipped on failure.
-    try {
-      final content = await ContentFetcher.fetchFor(url, meta.type.name);
-      if (content?.isNotEmpty == true) {
-        context.writeln('Page content: ${content!.substring(0, content.length.clamp(0, 3000))}');
-      }
-    } catch (_) {}
+    // Content fetchers (YouTube oEmbed+watch page / Reddit PullPush+Arctic /
+    // Instagram oEmbed+embed caption): real post text so tags come from
+    // CONTENT, not just the title. Prefetched by the save controller and
+    // passed in; fetched here as fallback when called directly.
+    var content = fetchedContent;
+    if (content == null) {
+      try {
+        content = await ContentFetcher.fetchFor(url, meta.type.name);
+      } catch (_) {}
+    }
+    if (content?.isNotEmpty == true) {
+      context.writeln('Page content: ${content!.substring(0, content.length.clamp(0, 4000))}');
+    }
     final prompt = '''
 You categorize saved links for a read-it-later app. Reply with ONLY valid JSON, no markdown fences:
-{"category": "<one of: $categories>", "summary": "<1-2 line plain-language summary of what this is ABOUT (its topic/content — never describe the act of saving or opening the link)>", "tags": ["<up to 3 lowercase topic tags>"]}
+{"category": "<one of: $categories>", "subcategory": "<pick from the list for that category below>", "topic": "<3-6 word topic label, e.g. 'flutter riverpod state'>", "summary": "<1-2 line plain-language summary of what this is ABOUT (its topic/content — never describe the act of saving or opening the link)>", "tags": ["<up to 3 lowercase topic tags>"], "key_points": ["<up to 3 short takeaways>"], "confidence": <0.0-1.0>}
+
+Subcategories per category:
+- Watch: tutorial, vlog, documentary, review, music-video, livestream, shorts, other-video
+- Read: news, blog, essay, thread, documentation, other-read
+- Listen: podcast, song, audiobook, other-audio
+- Movies & Shows: movie, series, trailer, other-screen
+- Learn: course, howto, reference, paper, other-learn
+- Ideas: startup, opinion, discussion, inspiration, other-idea
+- Shopping: product, deal, recipe, other-buy
+- Other: other
 
 Rules: YouTube/music videos -> Watch. Podcasts/audio -> Listen. Movies/series/IMDb -> Movies & Shows. Tutorials/docs/courses -> Learn. Products/deals -> Shopping. Reddit threads/discussions/opinion -> Ideas or Read based on content. News/articles/blogs -> Read. Default Other only if nothing fits.
 
@@ -329,10 +407,15 @@ ${context}''';
     if (extracted == null) {
       // Last resort: derive a usable enrichment from the raw text instead of
       // failing the whole save.
+      final fallbackCat = _guessFromText('$url-fallback $text');
       return AiEnrichment(
-        category: _guessFromText('$url-fallback $text'),
+        category: fallbackCat,
+        subcategory: AiSubcategories.normalize(fallbackCat, null),
+        topic: meta.title,
         summary: _cleanProse(text, url, meta),
         tags: const [],
+        keyPoints: const [],
+        confidence: 0.3,
       );
     }
     Map<String, dynamic> parsed;
@@ -341,8 +424,12 @@ ${context}''';
     } catch (_) {
       return AiEnrichment(
         category: Category.read,
+        subcategory: 'other-read',
+        topic: meta.title,
         summary: _cleanProse(text, url, meta),
         tags: const [],
+        keyPoints: const [],
+        confidence: 0.3,
       );
     }
     // Guard: model echoed keys but left values empty, or returned the schema
@@ -355,10 +442,19 @@ ${context}''';
         summary.contains('"summary"')) {
       summary = _cleanProse(text, url, meta);
     }
+    final cat = _parseCategory(parsed['category'] as String?);
     return AiEnrichment(
-      category: _parseCategory(parsed['category'] as String?),
+      category: cat,
+      subcategory: AiSubcategories.normalize(cat, parsed['subcategory'] as String?),
+      topic: ((parsed['topic'] as String?) ?? '').trim(),
       summary: summary,
       tags: ((parsed['tags'] as List?) ?? []).map((e) => e.toString().toLowerCase()).take(3).toList(),
+      keyPoints: ((parsed['key_points'] as List?) ?? [])
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .take(3)
+          .toList(),
+      confidence: (parsed['confidence'] is num) ? (parsed['confidence'] as num).toDouble().clamp(0.0, 1.0) : 0.7,
     );
   }
 
@@ -489,8 +585,9 @@ ${context}''';
             : null;
     final context = StringBuffer(itemContext(item, highlights: highlights));
     if (body?.isNotEmpty == true) {
+      final b = body!;
       context.writeln(
-          'Article content (may be truncated): ${body!.substring(0, body!.length.clamp(0, 6000))}');
+          'Article content (may be truncated): ${b.substring(0, b.length.clamp(0, 6000))}');
     }
     const system =
         'You are a helpful reading companion inside a read-it-later app. Answer questions about the saved item below using its context. If the context lacks the answer, say what you can infer and what is missing. Keep answers concise.';

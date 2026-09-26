@@ -144,6 +144,11 @@ class _DetailBody extends ConsumerWidget {
               Chip(
                   avatar: const Icon(Icons.folder_outlined, size: 16),
                   label: Text(item.category.label)),
+              if ((item.aiSubcategory ?? '').isNotEmpty)
+                Chip(
+                    avatar: const Icon(Icons.subdirectory_arrow_right_outlined,
+                        size: 16),
+                    label: Text(item.aiSubcategory!)),
               Chip(
                   avatar: Icon(_typeIcon(item.type), size: 16),
                   label: Text(_typeLabel(item))),
@@ -168,10 +173,60 @@ class _DetailBody extends ConsumerWidget {
                 avatar: Icon(
                     item.aiProcessed ? Icons.auto_awesome : Icons.cloud_off_outlined,
                     size: 16),
-                label: Text(item.aiProcessed ? 'AI' : 'offline rules'),
+                label: Text(item.aiProcessed
+                    ? (item.aiConfidence != null
+                        ? 'AI ${(item.aiConfidence! * 100).round()}%'
+                        : 'AI')
+                    : 'offline rules'),
               ),
             ],
           ),
+          // ---- AI insight card: topic + key points ----
+          if (item.aiProcessed &&
+              ((item.aiTopic ?? '').isNotEmpty ||
+                  item.aiKeyPoints.isNotEmpty)) ...[
+            const SizedBox(height: 12),
+            Card(
+              color: theme.colorScheme.primaryContainer.withValues(alpha: 0.35),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.auto_awesome, size: 16),
+                        const SizedBox(width: 6),
+                        Text('AI insight',
+                            style: theme.textTheme.titleSmall),
+                      ],
+                    ),
+                    if ((item.aiTopic ?? '').isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(item.aiTopic!,
+                          style: theme.textTheme.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w600)),
+                    ],
+                    if (item.aiKeyPoints.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      ...item.aiKeyPoints.map((k) => Padding(
+                            padding:
+                                const EdgeInsets.symmetric(vertical: 2),
+                            child: Row(
+                              crossAxisAlignment:
+                                  CrossAxisAlignment.start,
+                              children: [
+                                const Text('•  '),
+                                Expanded(child: Text(k)),
+                              ],
+                            ),
+                          )),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ],
           if (item.author != null) ...[
             const SizedBox(height: 8),
             Text('By ${item.author}', style: theme.textTheme.bodySmall),

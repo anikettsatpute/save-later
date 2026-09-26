@@ -87,6 +87,7 @@ class InboxPage extends ConsumerWidget {
           child: Column(
         children: [
           _StatsHeader(counts: counts, filter: filter, ref: ref),
+          _AiDashboardStrip(counts: counts, ref: ref),
           _SearchBar(filter: filter, ref: ref),
           _ActiveChips(filter: filter, ref: ref),
           Expanded(
@@ -349,7 +350,6 @@ class _StatsHeader extends StatelessWidget {
   final InboxFilter filter;
   final WidgetRef ref;
   const _StatsHeader({required this.counts, required this.filter, required this.ref});
-
   @override
   Widget build(BuildContext context) {
     final c = counts.maybeWhen(data: (v) => v, orElse: () => null);
@@ -378,6 +378,124 @@ class _StatsHeader extends StatelessWidget {
                 filter.copyWith(status: () => s.first),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// AI dashboard strip: category bars + top topics + top subcategories.
+/// Tapping a bar/chip filters the inbox (category tap) or searches (topic tap).
+class _AiDashboardStrip extends StatelessWidget {
+  final AsyncValue<ItemCounts> counts;
+  final WidgetRef ref;
+  const _AiDashboardStrip({required this.counts, required this.ref});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = counts.maybeWhen(data: (v) => v, orElse: () => null);
+    if (c == null || c.inbox == 0) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    final maxCat = c.perCategory.values.fold<int>(1, (a, b) => a > b ? a : b);
+    final topTopics = c.perTopic.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final topSubs = c.perSubcategory.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+      child: Card(
+        margin: EdgeInsets.zero,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.auto_awesome, size: 14),
+                  const SizedBox(width: 6),
+                  Text('AI overview', style: theme.textTheme.labelLarge),
+                  const Spacer(),
+                  Text('${c.inbox} items',
+                      style: theme.textTheme.labelSmall
+                          ?.copyWith(color: theme.colorScheme.outline)),
+                ],
+              ),
+              const SizedBox(height: 8),
+              // Category distribution bars (tap to filter).
+              ...Category.values.map((cat) {
+                final n = c.perCategory[cat] ?? 0;
+                if (n == 0) return const SizedBox.shrink();
+                return InkWell(
+                  onTap: () => ref.read(filterProvider.notifier).state =
+                      InboxFilter(category: cat),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                            width: 92,
+                            child: Text(cat.label,
+                                style: theme.textTheme.labelSmall,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis)),
+                        Expanded(
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(4),
+                            child: LinearProgressIndicator(
+                              value: n / maxCat,
+                              minHeight: 8,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        SizedBox(
+                            width: 28,
+                            child: Text('$n',
+                                textAlign: TextAlign.end,
+                                style: theme.textTheme.labelSmall)),
+                      ],
+                    ),
+                  ),
+                );
+              }),
+              if (topTopics.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: [
+                    for (final e in topTopics.take(6))
+                      ActionChip(
+                        label: Text('${e.key} · ${e.value}'),
+                        visualDensity: VisualDensity.compact,
+                        onPressed: () =>
+                            ref.read(filterProvider.notifier).state =
+                                InboxFilter(query: e.key, status: null),
+                      ),
+                  ],
+                ),
+              ],
+              if (topSubs.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: [
+                    for (final e in topSubs.take(6))
+                      FilterChip(
+                        label: Text('${e.key} · ${e.value}'),
+                        visualDensity: VisualDensity.compact,
+                        selected: false,
+                        onSelected: (_) =>
+                            ref.read(filterProvider.notifier).state =
+                                InboxFilter(query: e.key, status: null),
+                      ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -895,6 +1013,13 @@ class _ItemCard extends ConsumerWidget {
                               children: [
                                 _badge(context, item.category.label,
                                     Icons.folder_outlined),
+                                if ((item.aiSubcategory ?? '').isNotEmpty)
+                                  _badge(context, item.aiSubcategory!,
+                                      Icons.subdirectory_arrow_right_outlined),
+                                if ((item.aiTopic ?? '').isNotEmpty)
+                                  _badge(context, item.aiTopic!,
+                                      Icons.tag_outlined,
+                                      highlight: true),
                                 ..._signalBadges(context, item),
                                 ...item.tags.take(2).map((t) => Text(
                                     '#$t',
@@ -984,7 +1109,6 @@ class _HeadlineRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
     return Dismissible(
       key: ValueKey('h-${item.id}'),
       background: Container(
@@ -1037,12 +1161,15 @@ List<Widget> _signalBadges(BuildContext context, SavedItem item) {
   return out;
 }
 
-Widget _badge(BuildContext context, String text, IconData icon) {
+Widget _badge(BuildContext context, String text, IconData icon,
+    {bool highlight = false}) {
   final theme = Theme.of(context);
   return Container(
     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
     decoration: BoxDecoration(
-      color: theme.colorScheme.surfaceContainerHighest,
+      color: highlight
+          ? theme.colorScheme.primaryContainer
+          : theme.colorScheme.surfaceContainerHighest,
       borderRadius: BorderRadius.circular(12),
     ),
     child: Row(

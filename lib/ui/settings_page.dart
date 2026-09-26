@@ -128,11 +128,17 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     for (final item in items.where((e) => !e.aiProcessed)) {
       try {
         final meta = await LinkParser.fetchMeta(item.url);
-        final r = await ai.enrichWithFlag(url: item.url, meta: meta);
+        // Reuse stored bodyText so retry sees the same platform content the
+        // original save fetched (YouTube/Reddit/Instagram), plus user note.
+        final r = await ai.enrichWithFlag(
+          url: item.url,
+          meta: meta,
+          userNote: item.userNote,
+          fetchedContent: item.bodyText,
+        );
         if (r.usedAi) {
           fixed++;
-          await _upsertEnriched(
-              item.id, r.enrichment.category, r.enrichment.summary, r.enrichment.tags);
+          await _upsertEnriched(item.id, r.enrichment);
         }
       } catch (_) {}
     }
@@ -146,18 +152,21 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     }
   }
 
-  Future<void> _upsertEnriched(
-      String itemId, Category category, String summary, List<String> tags) async {
+  Future<void> _upsertEnriched(String itemId, AiEnrichment e) async {
     final items = await ref.read(itemsProvider.future);
     final item = items.where((e) => e.id == itemId).firstOrNull;
     if (item == null) return;
     final container = ProviderScope.containerOf(context, listen: false);
     final db = container.read(dbProviderForRetry);
     await db.upsert(item.copyWith(
-      category: category,
-      summary: summary.isNotEmpty ? summary : item.summary,
-      tags: tags,
+      category: e.category,
+      summary: e.summary.isNotEmpty ? e.summary : item.summary,
+      tags: e.tags,
       aiProcessed: true,
+      aiTopic: e.topic.isNotEmpty ? e.topic : null,
+      aiSubcategory: e.subcategory.isNotEmpty ? e.subcategory : null,
+      aiKeyPoints: e.keyPoints,
+      aiConfidence: e.confidence,
     ));
   }
 

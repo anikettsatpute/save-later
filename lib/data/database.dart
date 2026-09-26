@@ -3,11 +3,11 @@ import 'package:sqflite/sqflite.dart';
 
 import '../models/saved_item.dart';
 
-/// Local SQLite store. v3 adds: bodyText/userNote/remindAt on items,
-/// collections + item_collections, tag_rules, highlights, FTS5 index.
+/// Local SQLite store. v5 adds: aiTopic/aiSubcategory/aiKeyPoints/
+/// aiConfidence on items (AI subcategory taxonomy + topic + key points).
 class AppDatabase {
   static const _name = 'save_later.db';
-  static const _version = 4;
+  static const _version = 5;
   Database? _db;
   bool _ftsAvailable = true;
 
@@ -29,7 +29,7 @@ class AppDatabase {
     return opened;
   }
 
-  /// Shared v2/v3/v4 migration steps (used by both mobile + web open paths).
+  /// Shared v2/v3/v4/v5 migration steps (used by both mobile + web open paths).
   static Future<void> _upgrade(DatabaseExecutor d, int oldV) async {
     if (oldV < 2) {
       for (final col in [
@@ -52,6 +52,16 @@ class AppDatabase {
     }
     if (oldV < 4) {
       await _upgradeV4(d);
+    }
+    if (oldV < 5) {
+      for (final col in [
+        'aiTopic TEXT',
+        'aiSubcategory TEXT',
+        'aiKeyPoints TEXT',
+        'aiConfidence REAL',
+      ]) {
+        await _addColumn(d, col);
+      }
     }
   }
 
@@ -100,7 +110,11 @@ class AppDatabase {
         isVideo INTEGER,
         bodyText TEXT,
         userNote TEXT,
-        remindAt INTEGER
+        remindAt INTEGER,
+        aiTopic TEXT,
+        aiSubcategory TEXT,
+        aiKeyPoints TEXT,
+        aiConfidence REAL
       )
     ''');
     await d.execute('CREATE INDEX idx_items_status ON items(status)');
@@ -148,27 +162,27 @@ class AppDatabase {
       )
     ''');
     await d.execute('CREATE INDEX IF NOT EXISTS idx_hl_item ON highlights(itemId)');
-    // FTS5 full-text index over title/summary/body/tags/userNote. Wrapped:
-    // some vendor SQLite builds ship without FTS5 — failure must not break
-    // the whole open (list() falls back to LIKE when the table is absent).
+    // FTS5 full-text index over title/summary/body/tags/userNote/topic.
+    // Wrapped: some vendor SQLite builds ship without FTS5 — failure must
+    // not break the whole open (list() falls back to LIKE when absent).
     try {
       await d.execute('''
         CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
-          id UNINDEXED, title, summary, bodyText, tags, userNote,
+          id UNINDEXED, title, summary, bodyText, tags, userNote, aiTopic,
           content='', tokenize='porter'
         )
       ''');
       await d.execute('''
         CREATE TRIGGER IF NOT EXISTS trg_items_fts_insert AFTER INSERT ON items BEGIN
-          INSERT INTO items_fts(id, title, summary, bodyText, tags, userNote)
-          VALUES (new.id, new.title, new.summary, new.bodyText, new.tags, new.userNote);
+          INSERT INTO items_fts(id, title, summary, bodyText, tags, userNote, aiTopic)
+          VALUES (new.id, new.title, new.summary, new.bodyText, new.tags, new.userNote, new.aiTopic);
         END
       ''');
       await d.execute('''
         CREATE TRIGGER IF NOT EXISTS trg_items_fts_update AFTER UPDATE ON items BEGIN
           DELETE FROM items_fts WHERE id = old.id;
-          INSERT INTO items_fts(id, title, summary, bodyText, tags, userNote)
-          VALUES (new.id, new.title, new.summary, new.bodyText, new.tags, new.userNote);
+          INSERT INTO items_fts(id, title, summary, bodyText, tags, userNote, aiTopic)
+          VALUES (new.id, new.title, new.summary, new.bodyText, new.tags, new.userNote, new.aiTopic);
         END
       ''');
       await d.execute('''
@@ -182,18 +196,31 @@ class AppDatabase {
   }
 
   /// Backfill FTS rows for pre-v3 installs (triggers only cover new writes).
-  /// Never throws: if FTS5 is missing on the device, marks unavailable and
-  /// the list() path falls back to LIKE.
+  /// v5: rebuilds when the aiTopic column is missing so topic search works
+  /// on existing installs. Never throws.
   Future<void> backfillFts() async {
     if (!_ftsAvailable) return;
     try {
       final d = await db;
+      // v5 schema drift: old items_fts lacks aiTopic — rebuild it once.
+      try {
+        final cols = await d.rawQuery('SELECT * FROM items_fts LIMIT 0');
+        if (cols.isNotEmpty && !cols.first.containsKey('aiTopic')) {
+          await d.execute('DROP TRIGGER IF EXISTS trg_items_fts_insert');
+          await d.execute('DROP TRIGGER IF EXISTS trg_items_fts_update');
+          await d.execute('DROP TRIGGER IF EXISTS trg_items_fts_delete');
+          await d.execute('DROP TABLE IF EXISTS items_fts');
+          await _createV3Tables(d);
+        }
+      } catch (_) {
+        // Fresh table path already handled by _createV3Tables.
+      }
       final n = await d.rawQuery('SELECT COUNT(*) AS n FROM items_fts');
       final count = n.isEmpty ? 0 : (num.tryParse('${n.first['n']}') ?? 0);
       if (count > 0) return;
       await d.execute('''
-        INSERT INTO items_fts(id, title, summary, bodyText, tags, userNote)
-        SELECT id, title, summary, bodyText, tags, userNote FROM items
+        INSERT INTO items_fts(id, title, summary, bodyText, tags, userNote, aiTopic)
+        SELECT id, title, summary, bodyText, tags, userNote, aiTopic FROM items
       ''');
     } catch (_) {
       _ftsAvailable = false;
