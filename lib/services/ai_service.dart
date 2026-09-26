@@ -54,10 +54,12 @@ class AiService {
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
 
   /// User's preferred Gemini model, newest-first. Persisted per device.
+  /// Verified 2026-09-27 against a live key: gemini-2.5-flash* return 404
+  /// for new users; gemini-3-flash-preview returns clean JSON.
   static const availableModels = [
-    'gemini-3.6-flash',
-    'gemini-2.5-flash',
-    'gemini-2.5-flash-lite',
+    'gemini-3-flash-preview',
+    'gemini-flash-latest',
+    'gemini-3.1-flash-lite',
   ];
 
   Future<void> saveApiKey(String key) => _write(_keyName, key.trim());
@@ -275,8 +277,10 @@ class AiService {
 
   /// Single completion through the active provider. Gemini tries the
   /// preferred model then fallbacks; OpenRouter/Azure use the user's config.
+  /// Old stored model ids (e.g. gemini-2.5-flash, now 404) are skipped so
+  /// users with a stale preference don't get a dead model.
   Future<String> _complete(String prompt,
-      {int maxTokens = 400, double temperature = 0.2}) async {
+      {int maxTokens = 600, double temperature = 0.2}) async {
     final provider = await getProvider();
     switch (provider) {
       case AiProviderKind.openrouter:
@@ -297,13 +301,27 @@ class AiService {
             temperature: temperature);
       case AiProviderKind.gemini:
         final key = (await getApiKey()) ?? '';
-        // Preferred model first, then the rest as fallbacks.
-        // gemini-2.0-flash is SHUT DOWN (verified 2026-09-20).
+        // Preferred model first, then the rest as fallbacks. Stale stored
+        // ids (gemini-2.x, gemini-3.6 — all 404 now) are skipped silently.
+        const retired = {
+          'gemini-2.0-flash',
+          'gemini-2.5-flash',
+          'gemini-2.5-flash-lite',
+          'gemini-3.6-flash',
+        };
         final preferred = await getModel();
         final models = [
           preferred,
           ...availableModels.where((m) => m != preferred)
-        ];
+        ].where((m) => !retired.contains(m)).toList();
+        // Persisted preference may itself be retired — repair it so the
+        // next save doesn't retry a dead model first.
+        if (retired.contains(preferred)) {
+          try {
+            await saveModel(availableModels.first);
+          } catch (_) {}
+        }
+        if (models.isEmpty) models.add(availableModels.first);
         Object? lastErr;
         for (final model in models) {
           try {
@@ -460,7 +478,7 @@ ${context}''';
       topic: ((parsed['topic'] as String?) ?? '').trim(),
       collection: collection,
       summary: summary,
-      tags: ((parsed['tags'] as List?) ?? []).map((e) => e.toString().toLowerCase()).take(3).toList(),
+      tags: ((parsed['tags'] as List?) ?? []).map((e) => e.toString().toLowerCase()).take(5).toList(),
       keyPoints: ((parsed['key_points'] as List?) ?? [])
           .map((e) => e.toString().trim())
           .where((e) => e.isNotEmpty)

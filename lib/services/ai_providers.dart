@@ -59,11 +59,13 @@ class AzureConfig {
 /// Thin HTTP clients. Each returns the assistant's raw text or throws.
 class ProviderClients {
   /// Gemini generateContent (existing behavior).
+  /// responseMimeType forces JSON mode so the model returns parseable
+  /// output instead of prose-wrapped JSON (verified 2026-09-27).
   static Future<String> gemini({
     required String apiKey,
     required String model,
     required String prompt,
-    int maxTokens = 400,
+    int maxTokens = 600,
     double temperature = 0.2,
   }) async {
     final res = await http
@@ -82,6 +84,7 @@ class ProviderClients {
             'generationConfig': {
               'temperature': temperature,
               'maxOutputTokens': maxTokens,
+              'responseMimeType': 'application/json',
             },
           }),
         )
