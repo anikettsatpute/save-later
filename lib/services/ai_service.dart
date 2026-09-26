@@ -400,7 +400,7 @@ Subcategories per category:
 - Shopping: product, deal, recipe, other-buy
 - Other: other
 
-Collections: "collection" is ONE short topic-collection name the item belongs in — this auto-files it in the app's Collections drawer. Reuse one of these when it fits: AI, Tech, Finance, Stocks, Shopping, Politics, Sports, Health, Travel, Food, Fitness, Music, Movies, Gaming, Business, Science, Design, Learning, News. Only invent a new 1-2 word name when none fits.
+Collections: "collection" is ONE short topic-collection name the item belongs in — this auto-files it in the app's Collections drawer. Reuse one of these when it fits: AI, Tech, Finance, Stocks, Shopping, Politics, Sports, Health, Travel, Food, Fitness, Music, Movies, Gaming, Business, Science, Design, Learning, News. Content about AI agents, LLMs, RAG, prompts, or AI tooling goes in "AI" (not Tech). Only invent a new 1-2 word name when none fits.
 
 Rules: YouTube/music videos -> Watch. Podcasts/audio -> Listen. Movies/series/IMDb -> Movies & Shows. Tutorials/docs/courses -> Learn. Products/deals -> Shopping. Reddit threads/discussions/opinion -> Ideas or Read based on content. News/articles/blogs -> Read. Default Other only if nothing fits.
 
@@ -589,7 +589,7 @@ ${context}''';
     if (has(const ['crypto', 'bitcoin', 'finance', 'money', 'bank', 'loan', 'insurance', 'tax'])) {
       return 'Finance';
     }
-    if (has(const ['artificial intelligence', 'machine learning', ' llm', 'gpt', 'agent', 'chatbot'])) {
+    if (has(const ['artificial intelligence', 'machine learning', ' llm', 'gpt', 'agent', 'chatbot', 'rag', 'llama', 'langchain', 'prompt'])) {
       return 'AI';
     }
     if (has(const ['politic', 'election', 'government', 'policy', 'minister', 'parliament'])) {

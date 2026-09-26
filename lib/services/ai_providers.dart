@@ -101,29 +101,22 @@ class ProviderClients {
       throw Exception(
           'Gemini blocked the request (${body['promptFeedback'] ?? 'no reason'})');
     }
-    // gemini-3 puts the answer in parts WITHOUT thoughtSignature; thought
-    // parts carry the signature. Old code read parts.first, which is the
-    // thought — take the first part with real text and no signature.
+    // gemini-3 splits the answer across parts: "{" lands in a clean
+    // part, the rest in a thoughtSignature part. Old code read only one
+    // part and got broken JSON. Concatenate ALL text parts in order.
     final parts = (candidates.first['content']?['parts'] as List?);
     if (parts == null || parts.isEmpty) {
       throw Exception(
           'Gemini returned no text (finish: ${candidates.first['finishReason'] ?? 'unknown'})');
     }
-    String text = '';
+    final buf = StringBuffer();
     for (final p in parts) {
       final m = p as Map<String, dynamic>?;
-      final t = (m?['text'] as String? ?? '').trim();
+      final t = (m?['text'] as String? ?? '');
       if (t.isEmpty) continue;
-      if (m?.containsKey('thoughtSignature') == true && text.isEmpty) {
-        // Thought part that happens to contain text — keep as fallback
-        // only; prefer a clean non-thought part below.
-        text = t;
-        continue;
-      }
-      text = t;
-      break;
+      buf.write(t);
     }
-    text = text.trim();
+    final text = buf.toString().trim();
     if (text.isEmpty) throw Exception('Gemini returned empty response');
     return text;
   }
