@@ -1154,12 +1154,25 @@ Widget _typeIcon(SavedItem item, {double w = 96}) {
 }
 
 Widget _overflowMenu(BuildContext context, WidgetRef ref, SavedItem item) {
+  final recatting = ref.watch(recategorizingProvider).contains(item.id);
   return PopupMenuButton<String>(
     icon: const Icon(Icons.more_vert, size: 18),
     // Bigger tap area for thumbs (mobile UX: 18px icon was hard to hit).
     padding: const EdgeInsets.all(12),
     onSelected: (v) => _overflowAction(context, ref, item, preset: v),
     itemBuilder: (_) => [
+      PopupMenuItem(
+          value: 'recat',
+          enabled: !recatting,
+          child: Row(children: [
+            Icon(
+                item.aiProcessed ? Icons.auto_awesome_outlined : Icons.auto_awesome,
+                size: 18),
+            const SizedBox(width: 8),
+            Text(recatting
+                ? 'AI working…'
+                : (item.aiProcessed ? 'Re-categorize with AI' : 'Retry AI categorization')),
+          ])),
       PopupMenuItem(
           value: 'done',
           child: Text(item.status == ItemStatus.done ? 'Reopen' : 'Mark done')),
@@ -1179,6 +1192,11 @@ Future<void> _overflowAction(BuildContext context, WidgetRef ref, SavedItem item
           title: const Text('Item actions'),
           children: [
             SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, 'recat'),
+                child: Text(item.aiProcessed
+                    ? 'Re-categorize with AI'
+                    : 'Retry AI categorization')),
+            SimpleDialogOption(
                 onPressed: () => Navigator.pop(ctx, 'done'),
                 child: Text(item.status == ItemStatus.done ? 'Reopen' : 'Mark done')),
             SimpleDialogOption(
@@ -1190,7 +1208,23 @@ Future<void> _overflowAction(BuildContext context, WidgetRef ref, SavedItem item
           ],
         ),
       );
-  if (v == 'done') {
+  if (v == 'recat') {
+    try {
+      final msg = await ref
+          .read(saveControllerProvider.notifier)
+          .recategorize(item.id);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(msg)));
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+                'AI retry failed: ${'$e'.replaceFirst('Exception: ', '')}')));
+      }
+    }
+  } else if (v == 'done') {
     await ref.read(saveControllerProvider.notifier).setStatus(
         item.id, item.status == ItemStatus.done ? ItemStatus.inbox : ItemStatus.done);
   } else if (v == 'archive') {

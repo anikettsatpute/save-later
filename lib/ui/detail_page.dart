@@ -100,6 +100,7 @@ class _DetailBody extends ConsumerWidget {
     );
     // Web: constrain to a readable column (mobile UI stretched full-width
     // looks broken on desktop — tiny hero, huge empty gutters).
+    final recatting = ref.watch(recategorizingProvider).contains(item.id);
     return Scaffold(
       appBar: AppBar(
         title: Text(item.category.label),
@@ -303,6 +304,71 @@ class _DetailBody extends ConsumerWidget {
                 builder: (_) => AskAiSheet(item: item),
               ),
             ),
+          ),
+          const SizedBox(height: 8),
+          // AI re-categorize: visible always, emphasized when the item is
+          // still on offline rules (cloud_off icon + "Retry AI" label).
+          SizedBox(
+            width: double.infinity,
+            child: recatting
+                ? const OutlinedButton.icon(
+                    icon: SizedBox(
+                        width: 16,
+                        height: 16,
+                        child:
+                            CircularProgressIndicator(strokeWidth: 2)),
+                    label: Text('AI categorizing…'),
+                    onPressed: null,
+                  )
+                : item.aiProcessed
+                    ? OutlinedButton.icon(
+                        icon: const Icon(Icons.auto_awesome_outlined),
+                        label: const Text('Re-categorize with AI'),
+                        style: OutlinedButton.styleFrom(
+                            minimumSize: const Size.fromHeight(48)),
+                        onPressed: () async {
+                          try {
+                            final msg = await ref
+                                .read(saveControllerProvider.notifier)
+                                .recategorize(item.id);
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context)
+                                  .showSnackBar(SnackBar(content: Text(msg)));
+                            }
+                          } catch (e) {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                      content: Text(
+                                          'AI retry failed: ${'$e'.replaceFirst('Exception: ', '')}')));
+                            }
+                          }
+                        },
+                      )
+                    : FilledButton.tonalIcon(
+                        icon: const Icon(Icons.auto_awesome),
+                        label: const Text('Retry AI categorization'),
+                        style: FilledButton.styleFrom(
+                            minimumSize: const Size.fromHeight(52)),
+                        onPressed: () async {
+                          try {
+                            final msg = await ref
+                                .read(saveControllerProvider.notifier)
+                                .recategorize(item.id);
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context)
+                                  .showSnackBar(SnackBar(content: Text(msg)));
+                            }
+                          } catch (e) {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                      content: Text(
+                                          'AI retry failed: ${'$e'.replaceFirst('Exception: ', '')}')));
+                            }
+                          }
+                        },
+                      ),
           ),
           const SizedBox(height: 8),
           SizedBox(

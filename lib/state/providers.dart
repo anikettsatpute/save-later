@@ -423,7 +423,80 @@ class SaveController extends StateNotifier<AsyncValue<void>> {
     _ref.invalidate(itemsProvider);
     _bumpData(_ref);
   }
+
+  /// Re-runs AI categorization for one saved item (detail page retry +
+  /// inbox overflow menu). Refetches meta + platform body, enriches,
+  /// upserts the item, and re-files the AI collection. Returns a short
+  /// human message for the snackbar; throws only when nothing was saved.
+  Future<String> recategorize(String id) async {
+    final db = _storeRead(_ref);
+    final item = await db.getById(id);
+    if (item == null) throw Exception('Item not found');
+    final ai = _ref.read(_aiProvider);
+    _ref.read(recategorizingProvider.notifier).state =
+        {..._ref.read(recategorizingProvider), id};
+    try {
+      final meta = await LinkParser.fetchMeta(item.url);
+      String? fetched;
+      try {
+        fetched = await ContentFetcher.fetchFor(item.url, meta.type.name);
+      } catch (_) {}
+      fetched ??= item.bodyText;
+      final result = await ai.enrichWithFlag(
+        url: item.url,
+        meta: meta,
+        userNote: item.userNote,
+        fetchedContent: fetched,
+      );
+      final e = result.enrichment;
+      if (!result.usedAi) {
+        throw Exception(e.error ?? 'AI unavailable');
+      }
+      await db.upsert(item.copyWith(
+        category: e.category,
+        summary: e.summary.isNotEmpty ? e.summary : item.summary,
+        tags: e.tags.isNotEmpty ? e.tags : item.tags,
+        aiProcessed: true,
+        aiTopic: e.topic.isNotEmpty ? e.topic : null,
+        aiSubcategory: e.subcategory.isNotEmpty ? e.subcategory : null,
+        aiKeyPoints: e.keyPoints,
+        aiConfidence: e.confidence,
+        bodyText: (fetched != null && fetched.isNotEmpty)
+            ? (fetched.length > 6000
+                ? '${fetched.substring(0, 6000)}…'
+                : fetched)
+            : item.bodyText,
+      ));
+      // Re-file the AI collection (find-or-create, case-insensitive).
+      final name = e.collection.trim();
+      if (name.isNotEmpty) {
+        try {
+          final existing = await db.collections() as List<Collection>;
+          Collection? match;
+          for (final c in existing) {
+            if (c.name.trim().toLowerCase() == name.toLowerCase()) {
+              match = c;
+              break;
+            }
+          }
+          match ??= await _createCollection(db, name);
+          if (match != null) {
+            await db.setItemCollections(id, [match.id]);
+          }
+        } catch (_) {}
+      }
+      _ref.invalidate(itemsProvider);
+      _bumpData(_ref);
+      return 'AI re-categorized ✓ ${e.collection.isNotEmpty ? '→ ${e.collection}' : ''}';
+    } finally {
+      final next = {..._ref.read(recategorizingProvider)}..remove(id);
+      _ref.read(recategorizingProvider.notifier).state = next;
+    }
+  }
 }
 
 final saveControllerProvider =
     StateNotifierProvider<SaveController, AsyncValue<void>>((ref) => SaveController(ref));
+
+/// Ids currently being AI-recategorized (per-item progress spinners).
+final recategorizingProvider = StateProvider<Set<String>>((_) => const {});
