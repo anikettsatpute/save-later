@@ -5,7 +5,7 @@ Save anything — YouTube, Reddit, articles, movies — and find it later. AI au
 ## Use it
 
 - **Web app:** https://save-later-2245.web.app/ — sign in with Google, saves sync with your phone.
-- **Android app:** [Download APK (v2.8.0)](https://github.com/anikettsatpute/save-later/releases/download/v2.8.0/app-release.apk) — install, allow unknown apps, sign in with the same Google account.
+- **Android app:** [Download APK (v2.9.0)](https://github.com/anikettsatpute/save-later/releases/download/v2.9.0/app-release.apk) — install, allow unknown apps, sign in with the same Google account.
 
 ## Sync & privacy
 
