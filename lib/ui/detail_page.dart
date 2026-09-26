@@ -311,13 +311,13 @@ class _DetailBody extends ConsumerWidget {
           SizedBox(
             width: double.infinity,
             child: recatting
-                ? const OutlinedButton.icon(
-                    icon: SizedBox(
+                ? OutlinedButton.icon(
+                    icon: const SizedBox(
                         width: 16,
                         height: 16,
                         child:
                             CircularProgressIndicator(strokeWidth: 2)),
-                    label: Text('AI categorizing…'),
+                    label: const Text('AI categorizing…'),
                     onPressed: null,
                   )
                 : item.aiProcessed

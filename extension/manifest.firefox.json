@@ -1,0 +1,29 @@
+{
+  "manifest_version": 2,
+  "name": "Save to Save Later",
+  "version": "1.0.0",
+  "description": "Save any page, link, or selection to Save Later (AI auto-categorized).",
+  "browser_action": {
+    "default_title": "Save this tab to Save Later",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png"
+    }
+  },
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "permissions": ["contextMenus", "activeTab"],
+  "icons": {
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "save-to-save-later@savelater.app",
+      "strict_min_version": "109.0"
+    }
+  }
+}
